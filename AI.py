@@ -12,7 +12,9 @@ import os
 import json
 import textwrap
 from poke_env.player import Player
+from poke_env.player.battle_order import DoubleBattleOrder, SingleBattleOrder, PassBattleOrder
 from poke_env.battle.battle import Battle
+from poke_env.battle.double_battle import DoubleBattle
 from poke_env.battle.pokemon import Pokemon
 from poke_env.battle.move import Move
 from poke_env.ps_client.account_configuration import AccountConfiguration
@@ -262,6 +264,218 @@ def build_llm_prompt(battle: Battle) -> str:
 """.strip()
 
 
+def format_target(target) -> str:
+    if not target:
+        return "Unknown"
+    name = target.name if hasattr(target, "name") else str(target)
+    mapping = {
+        "ADJACENT_FOE": "Adjacent Foe (Opponent 1 or 2)",
+        "ANY": "Any adjacent or self (Ally/Opponent 1 or 2)",
+        "NORMAL": "Normal (Ally/Opponent 1 or 2)",
+        "ADJACENT_ALLY": "Adjacent Ally (partner)",
+        "ADJACENT_ALLY_OR_SELF": "Adjacent Ally or Self",
+        "ALL": "All field",
+        "ALL_ADJACENT": "All adjacent",
+        "ALL_ADJACENT_FOES": "All adjacent foes",
+        "ALLIES": "Allies",
+        "ALLY_SIDE": "Ally side",
+        "ALLY_TEAM": "Ally team",
+        "FOE_SIDE": "Foe side",
+        "RANDOM_NORMAL": "Random normal foe",
+        "SELF": "Self",
+    }
+    return mapping.get(name, name)
+
+
+def format_order_for_display(order: SingleBattleOrder, battle: DoubleBattle) -> str:
+    if isinstance(order, PassBattleOrder):
+        return "Pass"
+    
+    # If it is a switch
+    if isinstance(order.order, Pokemon):
+        return f"Switch to {order.order.species} (HP: {order.order.current_hp_fraction * 100:.0f}%)"
+    
+    # If it is a move
+    if isinstance(order.order, Move):
+        move_name = order.order.id.upper()
+        flags = []
+        if order.mega:
+            flags.append("MEGA")
+        if order.z_move:
+            flags.append("Z-MOVE")
+        if order.dynamax:
+            flags.append("DYNAMAX")
+        if order.terastallize:
+            flags.append("TERASTALLIZE")
+        
+        flag_str = f" [{'+'.join(flags)}]" if flags else ""
+        
+        # Target representation
+        target_val = order.move_target
+        target_name = "None"
+        if target_val == -1:
+            ally_mon = battle.active_pokemon[0]
+            target_name = f"Ally Slot 1 ({ally_mon.species if ally_mon else 'Empty'})"
+        elif target_val == -2:
+            ally_mon = battle.active_pokemon[1]
+            target_name = f"Ally Slot 2 ({ally_mon.species if ally_mon else 'Empty'})"
+        elif target_val == 1:
+            opp_mon = battle.opponent_active_pokemon[0]
+            target_name = f"Opponent Slot 1 ({opp_mon.species if opp_mon else 'Empty'})"
+        elif target_val == 2:
+            opp_mon = battle.opponent_active_pokemon[1]
+            target_name = f"Opponent Slot 2 ({opp_mon.species if opp_mon else 'Empty'})"
+        elif target_val == 0:
+            target_name = "Self / All / None (automatic)"
+            
+        return f"Move: {move_name}{flag_str} (target: {target_name})"
+        
+    return str(order)
+
+
+def build_doubles_llm_prompt(battle: DoubleBattle) -> str:
+    # Allies
+    active_allies = battle.active_pokemon
+    mon1 = active_allies[0] if len(active_allies) > 0 else None
+    mon2 = active_allies[1] if len(active_allies) > 1 else None
+
+    # Opponents
+    active_opps = battle.opponent_active_pokemon
+    opp1 = active_opps[0] if len(active_opps) > 0 else None
+    opp2 = active_opps[1] if len(active_opps) > 1 else None
+
+    # Weather, Terrain, Hazards, Screens
+    weather_terrain = weather_terrain_str(battle)
+    hazards_mine = hazards_str(battle.side_conditions)
+    hazards_opp = hazards_str(battle.opponent_side_conditions)
+    screens = screens_str(battle)
+
+    # Format each mon block
+    def format_mon_block(mon: Optional[Pokemon], slot_label: str) -> str:
+        if mon is None:
+            return f"[{slot_label}]: None (Fainted or Empty)"
+        
+        raw = mon.stats or {}
+        stats_str = (
+            f"HP:{raw.get('hp','?')} Atk:{raw.get('atk','?')} Def:{raw.get('def','?')} "
+            f"SpA:{raw.get('spa','?')} SpD:{raw.get('spd','?')} Spe:{raw.get('spe','?')}"
+        )
+        boosts = boosts_str(mon)
+        status = status_str(mon)
+        item = mon.item or "Unknown"
+        ability = mon.ability or "Unknown"
+        
+        return f"""
+[{slot_label}]:     {mon.species}
+[HP_PERCENT]:    {hp_str(mon)}
+[ITEM]:          {item}
+[ABILITY]:       {ability}
+[STATS]:         {stats_str}
+[STAT_STAGES]:   {boosts}
+[STATUS]:        {status}
+""".strip()
+
+    # Ally 1
+    mon1_block = format_mon_block(mon1, "MY_ACTIVE_SLOT_1")
+    # Ally 2
+    mon2_block = format_mon_block(mon2, "MY_ACTIVE_SLOT_2")
+    # Opp 1
+    opp1_block = format_mon_block(opp1, "OPP_ACTIVE_SLOT_1")
+    # Opp 2
+    opp2_block = format_mon_block(opp2, "OPP_ACTIVE_SLOT_2")
+
+    # Move blocks
+    def format_moves_block(moves: List[Move]) -> str:
+        return "\n".join(f"  • {format_move(m)}" for m in moves) if moves else "  (none)"
+
+    my_moves_1 = format_moves_block(battle.available_moves[0]) if len(battle.available_moves) > 0 else "  (none)"
+    my_moves_2 = format_moves_block(battle.available_moves[1]) if len(battle.available_moves) > 1 else "  (none)"
+
+    def format_opp_revealed(opp: Optional[Pokemon]) -> str:
+        if opp is None or not opp.moves:
+            return "  (none revealed yet)"
+        return "\n".join(f"  • {m}" for m in opp.moves.keys())
+
+    opp_moves_1 = format_opp_revealed(opp1)
+    opp_moves_2 = format_opp_revealed(opp2)
+
+    # Switches
+    def format_switches(switches: List[Pokemon]) -> str:
+        return "\n".join(
+            f"  • {s.species:16s} | HP: {s.current_hp_fraction*100:.0f}%"
+            + (f" | Status: {s.status.name}" if s.status else "")
+            + (f" | @{s.item}"               if s.item   else "")
+            for s in switches
+        ) or "  (none)"
+
+    switches_1 = format_switches(battle.available_switches[0]) if len(battle.available_switches) > 0 else "  (none)"
+    switches_2 = format_switches(battle.available_switches[1]) if len(battle.available_switches) > 1 else "  (none)"
+
+    # Tera details
+    tera1_str = "Available (not yet used)" if (len(battle.can_tera) > 0 and battle.can_tera[0]) else "No / Already Used"
+    tera2_str = "Available (not yet used)" if (len(battle.can_tera) > 1 and battle.can_tera[1]) else "No / Already Used"
+
+    return f"""
+╔══════════════════════════════════════════════════════════════════╗
+║      GRANDMASTER POKÉMON DOUBLES BATTLE STATE — TURN {battle.turn:>3}      ║
+╚══════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━ MY ACTIVE SLOT 1 ━━━━━━━━━━━━━━━━━━━━━
+{mon1_block}
+[TERA_AVAILABLE]: {tera1_str}
+
+[AVAILABLE MOVES SLOT 1]:
+{my_moves_1}
+
+━━━━━━━━━━━━━━━━━━━━━ MY ACTIVE SLOT 2 ━━━━━━━━━━━━━━━━━━━━━
+{mon2_block}
+[TERA_AVAILABLE]: {tera2_str}
+
+[AVAILABLE MOVES SLOT 2]:
+{my_moves_2}
+
+━━━━━━━━━━━━━━━━━━ OPPONENT ACTIVE SLOT 1 ━━━━━━━━━━━━━━━━━━
+{opp1_block}
+
+[OPP_REVEALED_MOVES SLOT 1]:
+{opp_moves_1}
+
+━━━━━━━━━━━━━━━━━━ OPPONENT ACTIVE SLOT 2 ━━━━━━━━━━━━━━━━━━
+{opp2_block}
+
+[OPP_REVEALED_MOVES SLOT 2]:
+{opp_moves_2}
+
+━━━━━━━━━━━━━━━━━━━━━━━ TEAMS ━━━━━━━━━━━━━━━━━━━━━━━━
+[MY_TEAM]:
+{team_summary(battle.team)}
+
+[OPP_TEAM]:
+{opp_team_summary(battle.opponent_team)}
+
+━━━━━━━━━━━━━━━━━━━━━ FIELD STATE ━━━━━━━━━━━━━━━━━━━━
+[WEATHER_TERRAIN]: {weather_terrain}
+[HAZARDS_MINE]:    {hazards_mine}
+[HAZARDS_OPP]:     {hazards_opp}
+[SCREENS]:         {screens}
+
+━━━━━━━━━━━━━━━━━━ AVAILABLE SWITCHES ━━━━━━━━━━━━━━━━━━
+[SLOT 1 SWITCHES]:
+{switches_1}
+
+[SLOT 2 SWITCHES]:
+{switches_2}
+
+━━━━━━━━━━━━━━━━━━ DOUBLES TARGETS KEY ━━━━━━━━━━━━━━━━━━
+When outputting targets for slot-specific actions:
+- Ally Slot 1 (first slot): target value is -1
+- Ally Slot 2 (second slot): target value is -2
+- Opponent Slot 1: target value is 1
+- Opponent Slot 2: target value is 2
+- Self / All / Field: target value is 0
+""".strip()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLIPBOARD
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,7 +573,8 @@ Naive Nature
 
 FORMATS = [
     "gen9ou", "gen9ubers", "gen9uu", "gen9ru", "gen9nu", "gen9pu",
-    "gen9lc", "gen9nationaldex", "gen9randombattle", "gen8ou", "gen8ubers",
+    "gen9lc", "gen9nationaldex", "gen9randombattle", "gen9doublesou",
+    "gen9doublesrandombattle", "gen9vgc2026regg", "gen8ou", "gen8ubers",
 ]
 
 
@@ -541,7 +756,7 @@ def startup_wizard() -> dict:
 class PokémonAssistant(Player):
 
     # ── TEAM PREVIEW ──────────────────────────────────────────────────────────
-    async def teampreview(self, battle: Battle) -> str:
+    async def teampreview(self, battle) -> str:
         print("\n" + "═" * 70)
         print("🔍  STRATEGY PHASE: TEAM PREVIEW")
         print(f"\nOpponent's revealed team:\n{opp_team_summary(battle.opponent_team)}")
@@ -552,22 +767,62 @@ class PokémonAssistant(Player):
         for i, mon in enumerate(team_list, 1):
             print(f"  [{i}] {mon.species}")
 
-        print("\n[DECISION] Who should LEAD? (Enter number 1–6)")
-
-        while True:
-            try:
-                choice = await asyncio.to_thread(input, "Lead > ")
-                idx = int(choice.strip()) - 1
-                if 0 <= idx < len(team_list):
-                    order = list(range(1, len(team_list) + 1))
-                    order.insert(0, order.pop(idx))
-                    return "/team " + "".join(map(str, order))
-                print(f"❌  Pick a number between 1 and {len(team_list)}")
-            except (ValueError, EOFError):
-                print("❌  Invalid input. Please enter a number.")
+        is_doubles = isinstance(battle, DoubleBattle)
+        if is_doubles:
+            print("\n[DECISION] Choose Lead 1 and Lead 2 (Enter number 1–6)")
+            lead_idx_1 = -1
+            lead_idx_2 = -1
+            while True:
+                try:
+                    choice1 = await asyncio.to_thread(input, "Lead 1 > ")
+                    idx1 = int(choice1.strip()) - 1
+                    if 0 <= idx1 < len(team_list):
+                        lead_idx_1 = idx1
+                        break
+                    print(f"❌  Pick a number between 1 and {len(team_list)}")
+                except (ValueError, EOFError):
+                    print("❌  Invalid input. Please enter a number.")
+            while True:
+                try:
+                    choice2 = await asyncio.to_thread(input, "Lead 2 > ")
+                    idx2 = int(choice2.strip()) - 1
+                    if 0 <= idx2 < len(team_list) and idx2 != lead_idx_1:
+                        lead_idx_2 = idx2
+                        break
+                    if idx2 == lead_idx_1:
+                        print("❌  Lead 2 cannot be the same as Lead 1.")
+                    else:
+                        print(f"❌  Pick a number between 1 and {len(team_list)}")
+                except (ValueError, EOFError):
+                    print("❌  Invalid input. Please enter a number.")
+            
+            order = list(range(1, len(team_list) + 1))
+            val1 = lead_idx_1 + 1
+            val2 = lead_idx_2 + 1
+            order.remove(val1)
+            order.remove(val2)
+            order.insert(0, val2)
+            order.insert(0, val1)
+            return "/team " + "".join(map(str, order))
+        else:
+            print("\n[DECISION] Who should LEAD? (Enter number 1–6)")
+            while True:
+                try:
+                    choice = await asyncio.to_thread(input, "Lead > ")
+                    idx = int(choice.strip()) - 1
+                    if 0 <= idx < len(team_list):
+                        order = list(range(1, len(team_list) + 1))
+                        order.insert(0, order.pop(idx))
+                        return "/team " + "".join(map(str, order))
+                    print(f"❌  Pick a number between 1 and {len(team_list)}")
+                except (ValueError, EOFError):
+                    print("❌  Invalid input. Please enter a number.")
 
     # ── MAIN DECISION LOOP ────────────────────────────────────────────────────
-    async def choose_move(self, battle: Battle) -> str:
+    async def choose_move(self, battle) -> DoubleBattleOrder | SingleBattleOrder | DefaultBattleOrder:
+        if isinstance(battle, DoubleBattle):
+            return await self.choose_doubles_move(battle)
+
         me  = battle.active_pokemon
         opp = battle.opponent_active_pokemon
 
@@ -644,7 +899,70 @@ class PokémonAssistant(Player):
                     f"Switches: 1–{len(battle.available_switches)}"
                 )
 
-    async def choose_move_order(self, battle: Battle) -> str:
+    async def choose_doubles_move(self, battle: DoubleBattle) -> DoubleBattleOrder:
+        prompt = build_doubles_llm_prompt(battle)
+        clipboard_ok = copy_to_clipboard(prompt)
+
+        print("\n" + "═" * 70)
+        print(prompt)
+        print("═" * 70)
+
+        if clipboard_ok:
+            print("\n✅  Prompt copied to clipboard — paste into your AI chat (Ctrl+V).")
+        else:
+            print("\n⚠️   Clipboard unavailable. Copy the prompt above manually.")
+
+        valid_orders = battle.valid_orders
+        final_orders = [None, None]
+
+        for slot in range(2):
+            active_mon = battle.active_pokemon[slot]
+            slot_orders = valid_orders[slot]
+
+            non_pass_orders = [o for o in slot_orders if not isinstance(o, PassBattleOrder)]
+
+            if not non_pass_orders:
+                final_orders[slot] = PassBattleOrder()
+                print(f"\nSlot {slot + 1} ({active_mon.species if active_mon else 'Empty'}): PASS (No action available)")
+                continue
+
+            print(f"\n📋  AVAILABLE ACTIONS FOR SLOT {slot + 1} ({active_mon.species if active_mon else 'Empty'}):")
+            for idx, order in enumerate(non_pass_orders, 1):
+                desc = format_order_for_display(order, battle)
+                print(f"    [{idx}]  →  {desc}")
+
+            print(f"Commands for Slot {slot + 1}: Enter choice number (1-{len(non_pass_orders)}) | 'c' to copy prompt")
+
+            while True:
+                try:
+                    raw = await asyncio.to_thread(input, f"[SLOT {slot + 1} DECISION] > ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nInterrupted — picking random move.")
+                    return self.choose_random_move(battle)
+
+                choice = raw.strip().lower()
+                if not choice:
+                    continue
+
+                if choice == "c":
+                    if copy_to_clipboard(prompt):
+                        print("✅  Prompt copied to clipboard!")
+                    else:
+                        print("⚠️   Clipboard unavailable.")
+                    continue
+
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(non_pass_orders):
+                        final_orders[slot] = non_pass_orders[idx]
+                        break
+                    print(f"❌  Pick a number between 1 and {len(non_pass_orders)}")
+                except ValueError:
+                    print(f"❌  Invalid input. Enter a choice number.")
+
+        return DoubleBattleOrder(first_order=final_orders[0] or PassBattleOrder(), second_order=final_orders[1] or PassBattleOrder())
+
+    async def choose_move_order(self, battle) -> DoubleBattleOrder | SingleBattleOrder | DefaultBattleOrder:
         return await self.choose_move(battle)
 
 
