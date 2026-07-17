@@ -11,6 +11,8 @@ import sys
 import os
 import json
 import textwrap
+import re
+from typing import Optional, List, Dict
 from poke_env.player import Player
 from poke_env.player.battle_order import DoubleBattleOrder, SingleBattleOrder, PassBattleOrder
 from poke_env.battle.battle import Battle
@@ -41,14 +43,13 @@ class C:
 def banner():
     print(f"""
 {C.CYAN}{C.BOLD}
-  ██████╗  ██████╗ ██╗  ██╗███████╗
-  ██╔══██╗██╔═══██╗██║ ██╔╝██╔════╝
-  ██████╔╝██║   ██║█████╔╝ █████╗
-  ██╔═══╝ ██║   ██║██╔═██╗ ██╔══╝
-  ██║     ╚██████╔╝██║  ██╗███████╗
-  ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝
+  ######   ######  ##  ##  ######
+  ##  ##  ##   ## ##  ##  ##
+  ######  ##   ## ####    ####
+  ##      ##   ## ##  ##  ##
+  ##       ######  ##  ##  ######
   {C.RESET}{C.YELLOW}Showdown Battle Assistant  v2.0{C.RESET}
-  {C.DIM}──────────────────────────────────{C.RESET}
+  {C.DIM}--------------------------------{C.RESET}
 """)
 
 
@@ -67,6 +68,10 @@ DEFAULT_CONFIG = {
     "last_team": "",
     "saved_teams": {},             # name → team_string
     "last_opponent": "",
+    "llm_provider": "ollama",      # "ollama", "gemini", "openai"
+    "llm_model": "llama3",         # default model name
+    "llm_api_key": "",
+    "llm_api_base": "",
 }
 
 def load_config() -> dict:
@@ -573,7 +578,7 @@ def ask(prompt: str, default: str = "") -> str:
 
 
 def section(title: str):
-    print(f"\n{C.CYAN}{C.BOLD}── {title} {'─' * max(0, 50 - len(title))}{C.RESET}")
+    print(f"\n{C.CYAN}{C.BOLD}== {title} {'=' * max(0, 50 - len(title))}{C.RESET}")
 
 
 def team_manager_menu(cfg: dict) -> str:
@@ -714,6 +719,31 @@ def startup_wizard() -> dict:
         num = 1
     cfg["num_battles"] = max(1, num)
 
+    # ── LLM CONFIGURATION ─────────────────────────────────────────────────────
+    section("LOCAL LLM CONFIGURATION")
+    print(f"  {C.BOLD}[1]{C.RESET} Ollama (local running instance)")
+    print(f"  {C.BOLD}[2]{C.RESET} Gemini API (OpenAI-compatible)")
+    print(f"  {C.BOLD}[3]{C.RESET} OpenAI API / Custom OpenAI-compatible endpoint")
+    prov_choice = ask("Select LLM Provider", {"ollama": "1", "gemini": "2", "openai": "3"}.get(cfg.get("llm_provider", "ollama"), "1"))
+    
+    provider_map = {"1": "ollama", "2": "gemini", "3": "openai"}
+    cfg["llm_provider"] = provider_map.get(prov_choice, "ollama")
+    
+    default_models = {
+        "ollama": "llama3",
+        "gemini": "gemini-2.5-flash",
+        "openai": "gpt-4o-mini"
+    }
+    cfg["llm_model"] = ask("Model Name", cfg.get("llm_model") or default_models[cfg["llm_provider"]])
+    
+    if cfg["llm_provider"] in ("gemini", "openai"):
+        env_key = os.environ.get("GEMINI_API_KEY") if cfg["llm_provider"] == "gemini" else os.environ.get("OPENAI_API_KEY")
+        key_prompt = "API Key"
+        if env_key:
+            key_prompt += " (detected from env, press Enter to keep)"
+        cfg["llm_api_key"] = ask(key_prompt, cfg.get("llm_api_key") or "")
+        cfg["llm_api_base"] = ask("Custom API Base URL (optional)", cfg.get("llm_api_base") or "")
+
     # ── SUMMARY ───────────────────────────────────────────────────────────────
     section("SESSION SUMMARY")
     print(f"  Username  : {C.CYAN}{cfg['username']}{C.RESET}")
@@ -724,6 +754,8 @@ def startup_wizard() -> dict:
     print(f"  Battles   : {C.CYAN}{cfg['num_battles']}{C.RESET}")
     first_mon = team_str.strip().split("\n")[0]
     print(f"  Team lead : {C.CYAN}{first_mon}{C.RESET}")
+    print(f"  LLM Prov  : {C.CYAN}{cfg['llm_provider']}{C.RESET}")
+    print(f"  LLM Model : {C.CYAN}{cfg['llm_model']}{C.RESET}")
 
     confirm = ask(f"\n{C.GREEN}Start? (y/n)", "y")
     if confirm.lower() != "y":
@@ -740,157 +772,306 @@ def startup_wizard() -> dict:
 # PLAYER
 # ─────────────────────────────────────────────────────────────────────────────
 
-class PokémonAssistant(Player):
+def load_system_prompt() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    prompt_path = os.path.join(script_dir, "prompt.txt")
+    if os.path.exists(prompt_path):
+        try:
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            print(f"⚠️ Error reading prompt.txt: {e}")
+    else:
+        print(f"⚠️ prompt.txt not found at {prompt_path}")
+    return "You are a Grandmaster-level Competitive Pokémon Singles Player. Your goal is to maximize win probability."
 
-    # ── TEAM PREVIEW ──────────────────────────────────────────────────────────
+
+class PokémonAssistant(Player):
+    def __init__(self, *args, llm_config: dict = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.llm_config = llm_config or {}
+        self.llm_provider = self.llm_config.get("llm_provider", "ollama")
+        self.llm_model = self.llm_config.get("llm_model", "llama3")
+        self.llm_api_key = self.llm_config.get("llm_api_key") or os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        self.llm_api_base = self.llm_config.get("llm_api_base")
+        self.system_prompt = load_system_prompt()
+
+    async def query_llm(self, user_prompt: str) -> str:
+        provider = self.llm_provider.lower()
+        model = self.llm_model
+        
+        print(f"\n🔮 Sending state to LLM ({provider} / {model})...")
+        
+        def _call():
+            if provider == "ollama":
+                import ollama
+                response = ollama.chat(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                return response['message']['content']
+            elif provider in ("gemini", "openai"):
+                from openai import OpenAI
+                api_key = self.llm_api_key
+                base_url = self.llm_api_base
+                if not base_url:
+                    if provider == "gemini":
+                        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                    else:
+                        base_url = "https://api.openai.com/v1/"
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                return response.choices[0].message.content
+            else:
+                raise ValueError(f"Unknown LLM provider: {provider}")
+                
+        return await asyncio.to_thread(_call)
+
+    def parse_action(self, response_text: str, battle) -> DoubleBattleOrder | SingleBattleOrder | None:
+        match = re.search(r'\*\*ACTION:\s*(.*?)\*\*', response_text, re.IGNORECASE)
+        if not match:
+            match = re.search(r'ACTION:\s*([^\n\r]+)', response_text, re.IGNORECASE)
+            
+        if not match:
+            print("⚠️ Could not parse ACTION format from LLM response.")
+            return None
+            
+        action_str = match.group(1).strip().lower()
+        print(f"🤖 Parsed Action String: '{action_str}'")
+        
+        valid_actions = []
+        is_doubles = isinstance(battle, DoubleBattle)
+        
+        if not is_doubles:
+            for m in battle.available_moves:
+                valid_actions.append(("move", m, False))
+                if battle.can_tera:
+                    valid_actions.append(("move", m, True))
+            for s in battle.available_switches:
+                valid_actions.append(("switch", s, False))
+        
+        digits = re.findall(r'\d+', action_str)
+        if digits:
+            idx = int(digits[0]) - 1
+            if 0 <= idx < len(valid_actions):
+                action_type, target, is_tera = valid_actions[idx]
+                print(f"✅ Matched by index {idx+1}: {action_type} {target} (Tera: {is_tera})")
+                return self.create_order(target, terastallize=is_tera)
+                
+        is_tera = "tera" in action_str
+        
+        for s in battle.available_switches:
+            species_name = s.species.lower()
+            if species_name in action_str:
+                print(f"✅ Matched switch by name: {s.species}")
+                return self.create_order(s)
+                
+        for m in battle.available_moves:
+            move_id = m.id.lower()
+            move_name_clean = m.name.lower().replace(" ", "").replace("-", "")
+            action_clean = action_str.replace(" ", "").replace("-", "")
+            if move_id in action_clean or move_name_clean in action_clean:
+                print(f"✅ Matched move by name: {m.name} (Tera: {is_tera})")
+                return self.create_order(m, terastallize=is_tera)
+                
+        print("⚠️ Could not match action string to any valid move or switch.")
+        return None
+
     # ── TEAM PREVIEW ──────────────────────────────────────────────────────────
     async def teampreview(self, battle) -> str:
         print("\n" + "═" * 70)
-        print("🤖  STRATEGY PHASE: AUTOMATED TEAM PREVIEW")
+        print("🤖  STRATEGY PHASE: TEAM PREVIEW")
         print(f"\nOpponent's revealed team:\n{opp_team_summary(battle.opponent_team)}")
         print("═" * 70)
 
         team_list = list(battle.team.values())
-        print("\n📋  YOUR TEAM:")
+        opp_team = list(battle.opponent_team.values())
+        
+        prompt_lines = [
+            "╔══════════════════════════════════════════════════════════════════╗",
+            "║                  TEAM PREVIEW PHASE                              ║",
+            "╚══════════════════════════════════════════════════════════════════╝",
+            "",
+            "📋 YOUR TEAM:",
+        ]
         for i, mon in enumerate(team_list, 1):
-            print(f"  [{i}] {mon.species}")
+            prompt_lines.append(f"  [{i}] {mon.species}")
+            
+        prompt_lines.extend([
+            "",
+            "📋 OPPONENT'S TEAM:",
+        ])
+        for mon in opp_team:
+            prompt_lines.append(f"  • {mon.species}")
+            
+        prompt_lines.extend([
+            "",
+            "Please select the order of your team. The first Pokémon will be your lead.",
+            "Respond in this exact format at the very end of your response:",
+            "**ACTION: /team [digits]**",
+            f"Example: **ACTION: /team 213456** (meaning slot 2 is lead, then slot 1, 3, 4, 5, 6)",
+        ])
+        
+        user_prompt = "\n".join(prompt_lines)
+        
+        try:
+            response_text = await self.query_llm(user_prompt)
+            print(f"\n{C.CYAN}🧠 LLM Team Preview Thought Process:{C.RESET}")
+            print(response_text)
+            print(f"{C.CYAN}──────────────────────────────────────────────────{C.RESET}")
+            
+            match = re.search(r'\/team\s*([1-6]+)', response_text)
+            if match:
+                order_digits = match.group(1).strip()
+                if len(order_digits) == len(team_list) and all(d in order_digits for d in map(str, range(1, len(team_list)+1))):
+                    print(f"✅ LLM selected team preview order: {order_digits}")
+                    return f"/team {order_digits}"
+            print("⚠️ Could not parse valid team order. Falling back to default lead (1).")
+        except Exception as e:
+            print(f"⚠️ Team preview LLM call failed: {e}. Falling back to default lead (1).")
+            
+        order = list(range(1, len(team_list) + 1))
+        return "/team " + "".join(map(str, order))
 
-        is_doubles = isinstance(battle, DoubleBattle)
-        if is_doubles:
-            print("\n[AI DECISION] Automatically selecting slots 1 and 2 as leads.")
-            # Default to the first two slots as leads
-            lead_idx_1 = 0
-            lead_idx_2 = 1 if len(team_list) > 1 else 0
-            
-            order = list(range(1, len(team_list) + 1))
-            val1 = lead_idx_1 + 1
-            val2 = lead_idx_2 + 1
-            
-            if val1 in order:
-                order.remove(val1)
-            if val2 in order:
-                order.remove(val2)
-                
-            order.insert(0, val2)
-            order.insert(0, val1)
-            return "/team " + "".join(map(str, order))
-        else:
-            print("\n[AI DECISION] Automatically selecting slot 1 as lead.")
-            # Default to the first slot as lead
-            idx = 0
-            order = list(range(1, len(team_list) + 1))
-            order.insert(0, order.pop(idx))
-            return "/team " + "".join(map(str, order))
-    # ── MAIN DECISION LOOP ────────────────────────────────────────────────────
-    # ── MAIN DECISION LOOP ────────────────────────────────────────────────────
     # ── MAIN DECISION LOOP ────────────────────────────────────────────────────
     async def choose_move(self, battle) -> DoubleBattleOrder | SingleBattleOrder:
-        # 1. Handle forced switches (if your active Pokemon faints)
-        if battle.available_switches and not battle.available_moves:
-            print(f"🤖 Forced switch! Sending out {battle.available_switches[0].species}")
-            return self.create_order(battle.available_switches[0])
+        if not battle.available_moves and not battle.available_switches:
+            print("🤖 No actions available! Passing.")
+            return self.choose_random_move(battle)
 
-        # 2. Heuristic Evaluation: Calculate the value of all attacks
-        best_move = None
-        highest_score = -1
+        valid_actions = []
+        for i, m in enumerate(battle.available_moves):
+            valid_actions.append(f"MOVE: {m.id}")
+            if battle.can_tera:
+                valid_actions.append(f"TERA_MOVE: {m.id}")
+        for s in battle.available_switches:
+            valid_actions.append(f"SWITCH: {s.species.lower()}")
 
-        if battle.available_moves:
-            for move in battle.available_moves:
-                power = move.base_power
-                multiplier = 1.0 
-                
-                # Check type effectiveness against the opponent
-                if battle.opponent_active_pokemon:
-                    multiplier = battle.opponent_active_pokemon.damage_multiplier(move)
-                
-                # Apply STAB (Same Type Attack Bonus) for 1.5x damage
-                if move.type in [battle.active_pokemon.type_1, battle.active_pokemon.type_2]:
-                    power *= 1.5
-                    
-                # Calculate the final strategic score
-                move_score = power * multiplier
-                
-                if move_score > highest_score:
-                    highest_score = move_score
-                    best_move = move
+        if len(valid_actions) == 1:
+            print(f"🤖 Only one valid action available: {valid_actions[0]}. Executing directly.")
+            if valid_actions[0].startswith("MOVE:"):
+                return self.create_order(battle.available_moves[0])
+            elif valid_actions[0].startswith("TERA_MOVE:"):
+                return self.create_order(battle.available_moves[0], terastallize=True)
+            else:
+                return self.create_order(battle.available_switches[0])
 
-        # 3. The "Thinking" Phase: Smart Switching
-        # If our best attack is weak (score < 60) and we have backup, retreat!
-        if highest_score < 60 and battle.available_switches:
-            best_switch = battle.available_switches[0]
-            print(f"🧠 AI calculated a disadvantage! Retreating to {best_switch.species}.")
-            return self.create_order(best_switch)
-
-        # 4. Execute the best attack
-        if best_move:
-            print(f"⚔️  AI selected {best_move.id.upper()} (Heuristic Score: {highest_score})")
-            return self.create_order(best_move)
-                
-        # 5. Fallback
-        print("🤖 Fallback: Selecting random action.")
+        prompt_lines = [
+            build_llm_prompt(battle),
+            "",
+            "━━━━━━━━━━━━━━━━━━━ VALID ACTIONS ━━━━━━━━━━━━━━━━━━━━",
+            "You MUST choose exactly one of these actions:",
+        ]
+        for i, act in enumerate(valid_actions, 1):
+            prompt_lines.append(f"  [{i}] {act}")
+            
+        prompt_lines.extend([
+            "",
+            "Please respond with your chosen action in this exact format at the very end of your response:",
+            "**ACTION: <chosen_action>**",
+            "For example: **ACTION: MOVE: bravebird** or **ACTION: SWITCH: alakazam** or **ACTION: TERA_MOVE: psychic** or **ACTION: 3**",
+            "If choosing a MOVE or TERA_MOVE, use the move ID (lowercased, no spaces, e.g. bravebird).",
+            "If choosing a SWITCH, use the pokemon species (lowercased, e.g. alakazam).",
+            "You can also use the index number, e.g. **ACTION: 3**",
+        ])
+        
+        user_prompt = "\n".join(prompt_lines)
+        
+        try:
+            response_text = await self.query_llm(user_prompt)
+            print(f"\n{C.CYAN}🧠 LLM Thought Process:{C.RESET}")
+            print(response_text)
+            print(f"{C.CYAN}──────────────────────────────────────────────────{C.RESET}")
+            
+            order = self.parse_action(response_text, battle)
+            if order:
+                return order
+            else:
+                print("⚠️ Action parsing failed. Falling back to random action.")
+        except Exception as e:
+            print(f"⚠️ LLM invocation failed: {e}. Falling back to random action.")
+            
         return self.choose_random_move(battle)
+
     async def choose_doubles_move(self, battle: DoubleBattle) -> DoubleBattleOrder:
         prompt = build_doubles_llm_prompt(battle)
-        clipboard_ok = copy_to_clipboard(prompt)
-
-        print("\n" + "═" * 70)
-        print(prompt)
-        print("═" * 70)
-
-        if clipboard_ok:
-            print("\n✅  Prompt copied to clipboard — paste into your AI chat (Ctrl+V).")
-        else:
-            print("\n⚠️   Clipboard unavailable. Copy the prompt above manually.")
-
+        
         valid_orders = battle.valid_orders
         final_orders = [None, None]
-
-        for slot in range(2):
-            active_mon = battle.active_pokemon[slot]
-            slot_orders = valid_orders[slot]
-
-            non_pass_orders = [o for o in slot_orders if not isinstance(o, PassBattleOrder)]
-
-            if not non_pass_orders:
-                final_orders[slot] = PassBattleOrder()
-                print(f"\nSlot {slot + 1} ({active_mon.species if active_mon else 'Empty'}): PASS (No action available)")
-                continue
-
-            print(f"\n📋  AVAILABLE ACTIONS FOR SLOT {slot + 1} ({active_mon.species if active_mon else 'Empty'}):")
-            for idx, order in enumerate(non_pass_orders, 1):
-                desc = format_order_for_display(order, battle)
-                print(f"    [{idx}]  →  {desc}")
-
-            print(f"Commands for Slot {slot + 1}: Enter choice number (1-{len(non_pass_orders)}) | 'c' to copy prompt")
-
-            while True:
-                try:
-                    raw = await asyncio.to_thread(input, f"[SLOT {slot + 1} DECISION] > ")
-                except (EOFError, KeyboardInterrupt):
-                    print("\nInterrupted — picking random move.")
-                    return self.choose_random_move(battle)
-
-                choice = raw.strip().lower()
-                if not choice:
-                    continue
-
-                if choice == "c":
-                    if copy_to_clipboard(prompt):
-                        print("✅  Prompt copied to clipboard!")
-                    else:
-                        print("⚠️   Clipboard unavailable.")
-                    continue
-
-                try:
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(non_pass_orders):
-                        final_orders[slot] = non_pass_orders[idx]
-                        break
-                    print(f"❌  Pick a number between 1 and {len(non_pass_orders)}")
-                except ValueError:
-                    print(f"❌  Invalid input. Enter a choice number.")
-
-        return DoubleBattleOrder(first_order=final_orders[0] or PassBattleOrder(), second_order=final_orders[1] or PassBattleOrder())
+        
+        prompt_lines = [
+            prompt,
+            "",
+            "━━━━━━━━━━━━━━━━━━━ ACTIONS FOR SLOT 1 ━━━━━━━━━━━━━━━━━━━━",
+        ]
+        non_pass_orders_1 = [o for o in valid_orders[0] if not isinstance(o, PassBattleOrder)]
+        if not non_pass_orders_1:
+            prompt_lines.append("  [PASS] No action available (Fainted/Empty)")
+        else:
+            for idx, order in enumerate(non_pass_orders_1, 1):
+                prompt_lines.append(f"  [{idx}] {format_order_for_display(order, battle)}")
+                
+        prompt_lines.append("\n━━━━━━━━━━━━━━━━━━━ ACTIONS FOR SLOT 2 ━━━━━━━━━━━━━━━━━━━━")
+        non_pass_orders_2 = [o for o in valid_orders[1] if not isinstance(o, PassBattleOrder)]
+        if not non_pass_orders_2:
+            prompt_lines.append("  [PASS] No action available (Fainted/Empty)")
+        else:
+            for idx, order in enumerate(non_pass_orders_2, 1):
+                prompt_lines.append(f"  [{idx}] {format_order_for_display(order, battle)}")
+                
+        prompt_lines.extend([
+            "",
+            "Please respond with your chosen actions for both slots at the very end of your response in this exact format:",
+            "**SLOT 1 ACTION: <index or description>**",
+            "**SLOT 2 ACTION: <index or description>**",
+            "Example: If you choose index 2 for Slot 1 and index 1 for Slot 2, output:",
+            "**SLOT 1 ACTION: 2**",
+            "**SLOT 2 ACTION: 1**",
+        ])
+        
+        user_prompt = "\n".join(prompt_lines)
+        
+        try:
+            response_text = await self.query_llm(user_prompt)
+            print(f"\n{C.CYAN}🧠 LLM Doubles Thought Process:{C.RESET}")
+            print(response_text)
+            print(f"{C.CYAN}──────────────────────────────────────────────────{C.RESET}")
+            
+            m1 = re.search(r'SLOT 1 ACTION:\s*(.*)', response_text, re.IGNORECASE)
+            m2 = re.search(r'SLOT 2 ACTION:\s*(.*)', response_text, re.IGNORECASE)
+            
+            if m1 and non_pass_orders_1:
+                act_str_1 = m1.group(1).strip()
+                digits_1 = re.findall(r'\d+', act_str_1)
+                if digits_1:
+                    idx_1 = int(digits_1[0]) - 1
+                    if 0 <= idx_1 < len(non_pass_orders_1):
+                        final_orders[0] = non_pass_orders_1[idx_1]
+            if m2 and non_pass_orders_2:
+                act_str_2 = m2.group(1).strip()
+                digits_2 = re.findall(r'\d+', act_str_2)
+                if digits_2:
+                    idx_2 = int(digits_2[0]) - 1
+                    if 0 <= idx_2 < len(non_pass_orders_2):
+                        final_orders[1] = non_pass_orders_2[idx_2]
+        except Exception as e:
+            print(f"⚠️ Doubles LLM call failed: {e}")
+            
+        if not final_orders[0]:
+            final_orders[0] = non_pass_orders_1[0] if non_pass_orders_1 else PassBattleOrder()
+        if not final_orders[1]:
+            final_orders[1] = non_pass_orders_2[0] if non_pass_orders_2 else PassBattleOrder()
+            
+        return DoubleBattleOrder(first_order=final_orders[0], second_order=final_orders[1])
 
     async def choose_move_order(self, battle) -> DoubleBattleOrder | SingleBattleOrder:
         return await self.choose_move(battle)
@@ -924,6 +1105,7 @@ async def main():
         battle_format=fmt,
         team=teambuilder,
         server_configuration=server_cfg,
+        llm_config=cfg,
     )
 
     print(f"\n{C.GREEN}{C.BOLD}🤖  Bot '{username}' is online.{C.RESET}")
