@@ -457,7 +457,9 @@ rawQuery=function rawQuery(act,data){
 
 data.act=act;
 var url='/~~'+PS.server.id+'/action.php';
-if(location.pathname.endsWith('.html')){
+if(location.hostname==='localhost'||location.hostname==='127.0.0.1'){
+url='https://play.pokemonshowdown.com/~~'+PS.server.id+'/action.php';
+}else if(location.pathname.endsWith('.html')){
 url='https://'+Config.routes.client+url;
 if(typeof POKEMON_SHOWDOWN_TESTCLIENT_KEY==='string'){
 data.sid=POKEMON_SHOWDOWN_TESTCLIENT_KEY.replace(/%2C/g,',');
