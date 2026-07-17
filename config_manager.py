@@ -221,7 +221,7 @@ def startup_wizard() -> dict:
     cfg = load_config()
 
     section("ACCOUNT")
-    username = ask("Username", cfg.get("username") or "Ironbotter")
+    username = ask("Bot Username (Separate from your browser account)", cfg.get("username") or "LLM_Bot")
     password = ask("Password (leave blank for guest/localhost)", cfg.get("password") or "")
     cfg["username"] = username
     cfg["password"] = password
@@ -243,16 +243,8 @@ def startup_wizard() -> dict:
     srv_choice = ask("Server", "1" if cfg.get("server", "localhost") == "localhost" else "2")
     cfg["server"] = "localhost" if srv_choice != "2" else "showdown"
 
-    section("BATTLE FORMAT")
-    for i, fmt in enumerate(FORMATS, 1):
-        print(f"  {C.BOLD}[{i:2d}]{C.RESET} {fmt}")
-    fmt_default = cfg.get("format", "gen9ou")
-    fmt_input = ask(f"Format (number or name)", fmt_default)
-    try:
-        cfg["format"] = FORMATS[int(fmt_input) - 1]
-    except (ValueError, IndexError):
-        cfg["format"] = fmt_input or fmt_default
-    print(f"  {C.GREEN}✓ Format: {cfg['format']}{C.RESET}")
+    # Always use Gen 9 OU format
+    cfg["format"] = "gen9ou"
 
     section("TEAM SELECTION")
     team_str = team_manager_menu(cfg)
