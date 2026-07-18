@@ -80,6 +80,7 @@ async def main():
         battle_format=fmt,
         team=ai_teambuilder,
         server_configuration=server_cfg,
+        log_level=logging.INFO,
     )
 
     print(f"\n{C.GREEN}{C.BOLD}🤖  Blue AI is online (LLM-controlled).{C.RESET}")
