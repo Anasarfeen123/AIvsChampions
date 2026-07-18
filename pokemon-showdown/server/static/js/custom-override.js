@@ -79,21 +79,27 @@
   function stopBattleMusic() {
     if (!battleMusic) return;
     try {
-      battleMusic.stop();
-      battleMusic.destroy();
+      battleMusic.pause();
+      battleMusic.currentTime = 0;
     } catch (err) {}
     battleMusic = null;
   }
 
   function startBattleMusic() {
-    if (!window.BattleSound || !window.HTMLAudioElement) return;
+    if (!window.HTMLAudioElement) return;
     try {
       if (PS && PS.prefs && PS.prefs.mute) return;
-      if (battleMusic && battleMusic.isPlaying) return;
+      if (battleMusic && !battleMusic.paused) return;
       if (!battleMusic) {
-        battleMusic = BattleSound.loadBgm('audio/bw-rival.mp3', 19180, 57373);
+        battleMusic = new Audio('https://play.pokemonshowdown.com/audio/bw-rival.mp3');
+        battleMusic.loop = true;
+        battleMusic.preload = 'auto';
+        battleMusic.volume = 0.35;
       }
-      battleMusic.resume();
+      var playPromise = battleMusic.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(function () {});
+      }
     } catch (err) {}
   }
 
@@ -155,7 +161,6 @@
   }
 
   function showWaiting(mode) {
-    stopBattleMusic();
     phase = 'waiting';
     activeChallengeRoomId = null;
     render(shell(
@@ -354,11 +359,13 @@
 
   function pickDifficulty(level) {
     currentDifficulty = level;
+    startBattleMusic();
     showWaiting(level);
     sendControlMessage('difficulty ' + level);
   }
 
   function rematchBattle() {
+    startBattleMusic();
     showWaiting(currentDifficulty || 'rematch');
     sendControlMessage('rematch');
   }
