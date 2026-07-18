@@ -73,6 +73,7 @@ class PokémonAssistant(Player):
 
     # ── TEAM PREVIEW ──────────────────────────────────────────────────────────
     async def teampreview(self, battle) -> str:
+        await self.ps_client.send_message(f"/join {battle.battle_tag}")
         print("\n" + "═" * 70)
         print("🔍  STRATEGY PHASE: TEAM PREVIEW")
         print(f"\nOpponent's revealed team:\n{opp_team_summary(battle.opponent_team)}")
@@ -148,6 +149,7 @@ class PokémonAssistant(Player):
         if isinstance(battle, DoubleBattle):
             return await self.choose_doubles_move(battle)
 
+        await self.ps_client.send_message(f"/join {battle.battle_tag}")
         me  = battle.active_pokemon
         opp = battle.opponent_active_pokemon
 
@@ -267,6 +269,7 @@ class PokémonAssistant(Player):
                 )
 
     async def choose_doubles_move(self, battle: DoubleBattle) -> DoubleBattleOrder:
+        await self.ps_client.send_message(f"/join {battle.battle_tag}")
         prompt = build_doubles_llm_prompt(battle)
         clipboard_ok = copy_to_clipboard(prompt)
 
