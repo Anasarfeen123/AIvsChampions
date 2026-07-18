@@ -209,7 +209,8 @@ class PokémonAssistant(Player):
                     dialogue = decision.get("rival_dialogue")
                     if dialogue:
                         dialogue_clean = dialogue.replace("\n", " ").strip()
-                        await self.ps_client.send_message(f"Blue: {dialogue_clean}", room=battle.battle_tag)
+                        print(f"🗣️  {C.CYAN}{C.BOLD}Rival Dialogue:{C.RESET} {dialogue_clean}")
+                        await self.ps_client.send_message(dialogue_clean, room=battle.battle_tag)
                     
                     if chosen_action["type"] == "move":
                         return self.create_order(battle.available_moves[chosen_action["index"]])
@@ -322,7 +323,8 @@ class PokémonAssistant(Player):
                 dialogue = decision.get("rival_dialogue")
                 if dialogue:
                     dialogue_clean = dialogue.replace("\n", " ").strip()
-                    await self.ps_client.send_message(f"Blue: {dialogue_clean}", room=battle.battle_tag)
+                    print(f"🗣️  {C.CYAN}{C.BOLD}Rival Dialogue:{C.RESET} {dialogue_clean}")
+                    await self.ps_client.send_message(dialogue_clean, room=battle.battle_tag)
                 
                 for slot in range(2):
                     active_mon = battle.active_pokemon[slot]

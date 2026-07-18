@@ -2,6 +2,7 @@ import asyncio
 import socket
 import subprocess
 import time
+import logging
 import argparse
 import os
 from pathlib import Path
@@ -55,6 +56,9 @@ async def main():
     parser.add_argument("--battles", "-b", type=int, default=1, help="Number of battles to play (default: 1)")
     
     args = parser.parse_args()
+
+    logging.basicConfig(format="%(message)s", level=logging.WARNING)
+    logging.getLogger("poke_env").setLevel(logging.INFO)
 
     server_process = ensure_showdown_server()
 
