@@ -75,6 +75,15 @@
       '</div>';
   }
 
+  function resultPortrait(won) {
+    var avatar = won ? 'blue' : 'red';
+    var label = won ? 'Blue AI' : 'Red Human';
+    return '' +
+      '<div class="overlay-result-avatar overlay-result-avatar--' + (won ? 'win' : 'loss') + '">' +
+        '<img src="/sprites/trainers/' + avatar + '.png" alt="' + label + '" />' +
+      '</div>';
+  }
+
   function showBoot() {
     phase = 'boot';
     activeChallengeRoomId = null;
@@ -100,10 +109,10 @@
       '</div>' +
       '<div class="overlay-actions overlay-actions--stack">' +
         '<button class="overlay-btn overlay-btn--easy" data-d="easy">' +
-          '<strong>Easy</strong><span>Qwen 2.5 7B</span><em>Casual sparring</em>' +
+          '<strong>Easy</strong><span>Heuristic</span><em>More mistakes, less pressure</em>' +
         '</button>' +
         '<button class="overlay-btn overlay-btn--medium" data-d="medium">' +
-          '<strong>Medium</strong><span>Gemma 4 E2B</span><em>Balanced play</em>' +
+          '<strong>Medium</strong><span>Qwen 2.5 7B</span><em>Balanced play</em>' +
         '</button>' +
         '<button class="overlay-btn overlay-btn--hard" data-d="hard">' +
           '<strong>Hard</strong><span>Gemini</span><em>Sharper lines</em>' +
@@ -196,11 +205,10 @@
     activeChallengeRoomId = null;
     stopPollers();
     render(shell(
-      sigil() +
+      resultPortrait(won) +
       '<div class="overlay-result ' + (won ? 'overlay-result--win' : 'overlay-result--loss') + '">' +
-        '<div class="overlay-result-mark">' + (won ? '&#9733;' : '&#9762;') + '</div>' +
         '<div class="overlay-title">' + (won ? 'Victory' : 'Defeat') + '</div>' +
-        '<div class="overlay-subtitle">' + (won ? 'You beat Blue AI.' : 'Blue AI won this time.') + '</div>' +
+        '<div class="overlay-subtitle">' + (won ? 'Blue AI takes this one.' : 'Red Human takes this one.') + '</div>' +
       '</div>' +
       '<div class="overlay-actions overlay-actions--stack">' +
         '<button class="overlay-btn overlay-btn--success" data-action="rematch">Play again</button>' +

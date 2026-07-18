@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 from typing import Any, Dict, List, Optional, Tuple
 
 from poke_env.battle.move import Move
@@ -67,7 +68,7 @@ def _move_offense_score(move: Move, active: Pokemon, opponent: Pokemon) -> Tuple
     if accuracy > 1:
         accuracy /= 100.0
     hits = float(move.expected_hits or 1)
-    stab = float(active.stab_multiplier(move.type)) if hasattr(active, "stab_multiplier") else 1.0
+    stab = float(active.stab_multiplier) if hasattr(active, "stab_multiplier") else 1.0
     effectiveness = float(opponent.damage_multiplier(move))
 
     if move.category == MoveCategory.PHYSICAL:
@@ -247,6 +248,20 @@ def should_skip_llm(actions: List[RankedAction]) -> bool:
     if top.kind == "switch" and top.score >= 40 and (top.score - second.score) >= 15:
         return True
     return False
+
+
+def choose_easy_action(actions: List[RankedAction]) -> Optional[RankedAction]:
+    if not actions:
+        return None
+    if len(actions) == 1:
+        return actions[0]
+
+    top = actions[: min(3, len(actions))]
+    if len(top) == 2 and top[0].score - top[1].score >= 28:
+        return top[0] if random.random() < 0.75 else top[1]
+
+    weights = [0.56, 0.28, 0.16][: len(top)]
+    return random.choices(top, weights=weights, k=1)[0]
 
 
 def action_template(action: RankedAction) -> str:

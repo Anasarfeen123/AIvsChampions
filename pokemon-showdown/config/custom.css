@@ -389,6 +389,35 @@ button:hover, .button:hover, .select:hover, select:hover, input[type="text"]:foc
     text-align: center;
 }
 
+.overlay-result-avatar {
+    width: 112px;
+    height: 112px;
+    margin: 0 auto 18px;
+    border-radius: 50%;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
+}
+
+.overlay-result-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: pixelated;
+}
+
+.overlay-result-avatar--win {
+    box-shadow: 0 0 0 1px rgba(103, 232, 249, 0.14), 0 18px 40px rgba(0, 0, 0, 0.3), 0 0 32px rgba(103, 232, 249, 0.14);
+}
+
+.overlay-result-avatar--loss {
+    box-shadow: 0 0 0 1px rgba(255, 120, 120, 0.14), 0 18px 40px rgba(0, 0, 0, 0.3), 0 0 32px rgba(255, 120, 120, 0.14);
+}
+
 .overlay-result-mark {
     width: 74px;
     height: 74px;

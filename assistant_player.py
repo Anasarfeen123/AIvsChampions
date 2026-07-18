@@ -17,6 +17,7 @@ from poke_env import ShowdownServerConfiguration, LocalhostServerConfiguration
 from config_manager import C, startup_wizard
 from battle_hybrid import (
     action_template,
+    choose_easy_action,
     score_double_slot_actions,
     score_single_actions,
     should_skip_llm,
@@ -75,10 +76,10 @@ class PokémonAssistant(Player):
     async def _set_difficulty(self, level: str):
         self.current_difficulty = level
         if level == "easy":
-            self.llm_client = OllamaClient(model_name="qwen2.5:7b")
-            self.llm_provider = "ollama"
+            self.llm_client = None
+            self.llm_provider = "heuristic"
         elif level == "medium":
-            self.llm_client = OllamaClient(model_name="gemma4:e2b")
+            self.llm_client = OllamaClient(model_name="qwen2.5:7b")
             self.llm_provider = "ollama"
         elif level == "hard":
             self.llm_client = GeminiClient(api_key=self._gemini_api_key)
@@ -279,14 +280,15 @@ class PokémonAssistant(Player):
         if not me or not opp:
             return self.choose_random_move(battle)
 
-        if self.auto_play and not self.llm_client.is_configured():
+        if self.auto_play and (self.llm_client is None or not self.llm_client.is_configured()):
             return self._auto_single_order(battle)
 
         ranked_actions = score_single_actions(battle)
         if not ranked_actions:
             return self._auto_single_order(battle) if self.auto_play else self.choose_random_move(battle)
 
-        shortlist = ranked_actions[:3]
+        shortlist_size = 5 if self.current_difficulty == "hard" else 3
+        shortlist = ranked_actions[:shortlist_size]
         shortlist_text = "─── TOP OPTIONS ───────────────────────────────────────\n" + summarize_actions(shortlist)
         prompt = build_llm_prompt(battle, shortlist_text=shortlist_text)
         clipboard_ok = copy_to_clipboard(prompt)
@@ -308,6 +310,14 @@ class PokémonAssistant(Player):
 
         actions = shortlist
 
+        if self.current_difficulty == "easy":
+            chosen_action = choose_easy_action(shortlist)
+            if chosen_action:
+                print(f"\n🤖  Easy heuristic decision: {chosen_action.label}")
+                print(f"💬  Reasoning: {chosen_action.reason}")
+                if chosen_action.kind in ("move", "switch"):
+                    return self.create_order(chosen_action.order)
+
         if should_skip_llm(shortlist):
             chosen_action = shortlist[0]
             print(f"\n🤖  Heuristic Decision: {chosen_action.label}")
@@ -322,7 +332,7 @@ class PokémonAssistant(Player):
             return self._auto_single_order(battle)
 
         # Query Gemini if configured
-        if self.llm_client.is_configured():
+        if self.llm_client and self.llm_client.is_configured():
             # Send previous turn's dialogue after the turn resolved
             prev_dialogue = self._pending_dialogue.pop(battle.battle_tag, None)
             if prev_dialogue:
@@ -402,7 +412,20 @@ class PokémonAssistant(Player):
     async def choose_doubles_move(self, battle: DoubleBattle) -> DoubleBattleOrder:
         await self.ps_client.send_message(f"/join {battle.battle_tag}")
         slot_ranked = [score_double_slot_actions(battle, 0), score_double_slot_actions(battle, 1)]
-        slot_shortlists = [ranked[:3] for ranked in slot_ranked]
+        shortlist_size = 5 if self.current_difficulty == "hard" else 3
+        slot_shortlists = [ranked[:shortlist_size] for ranked in slot_ranked]
+        if self.current_difficulty == "easy":
+            final_orders = []
+            for slot in range(2):
+                chosen = choose_easy_action(slot_shortlists[slot])
+                if chosen:
+                    print(f"\n🤖  Easy heuristic slot {slot + 1}: {chosen.label}")
+                    print(f"💬  Slot {slot + 1}: {chosen.reason}")
+                    final_orders.append(chosen.order)
+                else:
+                    final_orders.append(PassBattleOrder())
+            return DoubleBattleOrder(first_order=final_orders[0], second_order=final_orders[1])
+
         if all(slot_shortlists[slot] and should_skip_llm(slot_shortlists[slot]) for slot in range(2)):
             final_orders = [slot_shortlists[0][0].order, slot_shortlists[1][0].order]
             print(f"\n🤖  Heuristic Doubles Decision: Slot 1 -> {slot_shortlists[0][0].label} | Slot 2 -> {slot_shortlists[1][0].label}")
@@ -432,7 +455,7 @@ class PokémonAssistant(Player):
         slot_actions = slot_shortlists
 
         # Query Gemini if configured
-        if self.llm_client.is_configured():
+        if self.llm_client and self.llm_client.is_configured():
             # Send previous turn's dialogue after the turn resolved
             prev_dialogue = self._pending_dialogue.pop(battle.battle_tag, None)
             if prev_dialogue:
