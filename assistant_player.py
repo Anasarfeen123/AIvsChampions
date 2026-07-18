@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import argparse
+import re
 from typing import Optional, Any
 
 from poke_env.player import Player
@@ -14,6 +15,13 @@ from poke_env.teambuilder.constant_teambuilder import ConstantTeambuilder
 
 from poke_env import ShowdownServerConfiguration, LocalhostServerConfiguration
 from config_manager import C, startup_wizard
+from battle_hybrid import (
+    action_template,
+    score_double_slot_actions,
+    score_single_actions,
+    should_skip_llm,
+    summarize_actions,
+)
 from prompt_builder import (
     build_llm_prompt,
     build_doubles_llm_prompt,
@@ -52,13 +60,128 @@ class PokémonAssistant(Player):
         super().__init__(*args, **kwargs)
         self.llm_provider = llm_provider
         self.auto_play = auto_play
+        self._pending_dialogue: dict[str, str] = {}
+        self._gemini_api_key = gemini_api_key
+        self.difficulty_event = asyncio.Event()
+        self.rematch_event = asyncio.Event()
+        self.current_difficulty: Optional[str] = None
+        self.browser_username: Optional[str] = None
         if llm_provider == "ollama":
             self.llm_client = OllamaClient(model_name=ollama_model)
         else:
             self.llm_client = GeminiClient(api_key=gemini_api_key)
+        self._install_ps_message_hook()
+
+    async def _set_difficulty(self, level: str):
+        self.current_difficulty = level
+        if level == "easy":
+            self.llm_client = OllamaClient(model_name="qwen2.5:7b")
+            self.llm_provider = "ollama"
+        elif level == "medium":
+            self.llm_client = OllamaClient(model_name="gemma4:e2b")
+            self.llm_provider = "ollama"
+        elif level == "hard":
+            self.llm_client = GeminiClient(api_key=self._gemini_api_key)
+            self.llm_provider = "gemini"
+        print(f"\n⚙️  Difficulty set to: {level} ({self.llm_provider})")
+
+    def _install_ps_message_hook(self):
+        original_handle_message = self.ps_client._handle_message
+
+        async def wrapped_handle_message(message: str):
+            await self._process_browser_command(message)
+            await original_handle_message(message)
+
+        self.ps_client._handle_message = wrapped_handle_message
+
+    async def _process_browser_command(self, message: str):
+        try:
+            lines = message.split("\n")
+            for line in lines:
+                parts = line.split("|")
+                if len(parts) >= 4 and parts[1] == "pm":
+                    user1 = parts[2].strip() if len(parts) > 2 else ""
+                    user2 = parts[3].strip() if len(parts) > 3 else ""
+                    if self._is_valid_browser_user(user1) and user2 and user2.lower() == "blue ai":
+                        self.browser_username = user1
+                    elif self._is_valid_browser_user(user2) and user1 and user1.lower() == "blue ai":
+                        self.browser_username = user2
+                    for part in parts:
+                        text = part.strip()
+                        if text.startswith(("/text ", "/nonotify ", "/log ")):
+                            text = text.split(" ", 1)[1].strip() if " " in text else ""
+                        if text.startswith("battle-control "):
+                            text = text.split(" ", 1)[1].strip() if " " in text else ""
+                        if text.startswith("!difficulty"):
+                            parts2 = text.split(" ", 1)
+                            level = parts2[1].strip().lower() if len(parts2) > 1 else None
+                            if level in ("easy", "medium", "hard"):
+                                await self._set_difficulty(level)
+                                self.difficulty_event.set()
+                            return
+                        if text.startswith("difficulty "):
+                            level = text.split(" ", 1)[1].strip().lower()
+                            if level in ("easy", "medium", "hard"):
+                                await self._set_difficulty(level)
+                                self.difficulty_event.set()
+                            return
+                        elif text == "!rematch":
+                            self.rematch_event.set()
+                            return
+                        elif text == "rematch":
+                            self.rematch_event.set()
+                            return
+                if len(parts) >= 4 and parts[1] == "c:" and "battle-control " in line:
+                    self.logger.info("Received battle-control line: %s", line)
+                    sender = parts[3].strip() if len(parts) > 3 else ""
+                    if self._is_valid_browser_user(sender):
+                        self.browser_username = sender
+                        self.logger.info("Browser username set to: %s", self.browser_username)
+                    else:
+                        self.logger.warning("Ignoring invalid browser username from control line: %r", sender)
+                    match = re.search(r"battle-control\s+([a-zA-Z]+)(?:\s+([a-zA-Z]+))?", line)
+                    if not match:
+                        continue
+                    action = match.group(1).lower()
+                    value = (match.group(2) or "").lower()
+                    if action == "difficulty" and value in ("easy", "medium", "hard"):
+                        await self._set_difficulty(value)
+                        self.difficulty_event.set()
+                        return
+                    if action == "rematch":
+                        self.rematch_event.set()
+                        return
+        except Exception as e:
+            self.logger.error("Error handling browser command: %s", e)
+
+    def _is_valid_browser_user(self, name: str) -> bool:
+        userid = re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+        return bool(userid) and userid not in {"blueai", "guest", "guest1", "guest2", "system"}
+
+    def get_browser_username(self) -> Optional[str]:
+        return self.browser_username
 
     def _non_tera_orders(self, orders):
         return [order for order in orders if not getattr(order, "terastallize", False)]
+
+    def _battle_finished_callback(self, battle):
+        tag = battle.battle_tag
+        dialogue = self._pending_dialogue.pop(tag, None)
+        messages = []
+        if dialogue:
+            messages.append(dialogue)
+        if battle.won:
+            messages.append("Hah! Too easy. Better luck next time, Red!")
+        elif battle.lost:
+            messages.append("Tch... You got me this time, Red. But I'll be back!")
+        else:
+            messages.append("A tie? Let's call it a draw, Red.")
+        asyncio.ensure_future(self._send_delayed(tag, messages))
+
+    async def _send_delayed(self, tag: str, messages: list[str]):
+        await asyncio.sleep(1)
+        for msg in messages:
+            await self.ps_client.send_message(msg, room=tag)
 
     def _auto_single_order(self, battle):
         if battle.available_moves:
@@ -159,7 +282,13 @@ class PokémonAssistant(Player):
         if self.auto_play and not self.llm_client.is_configured():
             return self._auto_single_order(battle)
 
-        prompt       = build_llm_prompt(battle)
+        ranked_actions = score_single_actions(battle)
+        if not ranked_actions:
+            return self._auto_single_order(battle) if self.auto_play else self.choose_random_move(battle)
+
+        shortlist = ranked_actions[:3]
+        shortlist_text = "─── TOP OPTIONS ───────────────────────────────────────\n" + summarize_actions(shortlist)
+        prompt = build_llm_prompt(battle, shortlist_text=shortlist_text)
         clipboard_ok = copy_to_clipboard(prompt)
 
         print("\n" + "═" * 70)
@@ -171,31 +300,35 @@ class PokémonAssistant(Player):
         else:
             print("\n⚠️   Clipboard unavailable. Copy the prompt above manually.")
 
-        # Construct AVAILABLE ACTIONS list
-        actions = []
-        for idx, move in enumerate(battle.available_moves):
-            actions.append({
-                "type": "move",
-                "index": idx,
-                "description": f"Move: {move.id.upper()}"
-            })
-        for idx, switch in enumerate(battle.available_switches):
-            actions.append({
-                "type": "switch",
-                "index": idx,
-                "description": f"Switch to {switch.species} ({switch.current_hp_fraction*100:.0f}% HP)"
-            })
+        print("\n📋  TOP ACTIONS:")
+        for i, a in enumerate(shortlist, 1):
+            print(f"    [{i}]  →  {a.label}  (score {a.score:.1f})")
+        if len(ranked_actions) > len(shortlist):
+            print(f"    ... {len(ranked_actions) - len(shortlist)} more legal actions hidden")
 
-        print("\n📋  AVAILABLE ACTIONS:")
-        for i, a in enumerate(actions, 1):
-            print(f"    [{i}]  →  {a['description']}")
+        actions = shortlist
+
+        if should_skip_llm(shortlist):
+            chosen_action = shortlist[0]
+            print(f"\n🤖  Heuristic Decision: {chosen_action.label}")
+            print(f"💬  Reasoning: {chosen_action.reason}")
+            dialogue = action_template(chosen_action)
+            if dialogue:
+                self._pending_dialogue[battle.battle_tag] = dialogue
+            if chosen_action.kind == "move":
+                return self.create_order(chosen_action.order)
+            if chosen_action.kind == "switch":
+                return self.create_order(chosen_action.order)
+            return self._auto_single_order(battle)
 
         # Query Gemini if configured
         if self.llm_client.is_configured():
-            actions_str = "AVAILABLE ACTIONS:\n" + "\n".join(
-                f"  [{i+1}] {a['description']}" for i, a in enumerate(actions)
-            )
-            full_prompt = f"{prompt}\n\n{actions_str}\n\nYou MUST select one action index from the AVAILABLE ACTIONS list. Respond with the schema."
+            # Send previous turn's dialogue after the turn resolved
+            prev_dialogue = self._pending_dialogue.pop(battle.battle_tag, None)
+            if prev_dialogue:
+                await self.ps_client.send_message(prev_dialogue, room=battle.battle_tag)
+
+            full_prompt = f"{prompt}\n\nSelect one top option above. If a lower option is clearly safer, explain why in the reasoning. Respond with the schema."
             
             decision = await self.llm_client.get_decision(full_prompt, SingleBattleDecision)
             if decision:
@@ -205,19 +338,17 @@ class PokémonAssistant(Player):
                 if 0 <= action_idx < len(actions):
                     chosen_action = actions[action_idx]
                     provider_title = "Ollama" if self.llm_provider == "ollama" else "Gemini"
-                    print(f"\n🤖  {C.GREEN}{C.BOLD}{provider_title} Decision:{C.RESET} {chosen_action['description']}")
+                    print(f"\n🤖  {C.GREEN}{C.BOLD}{provider_title} Decision:{C.RESET} {chosen_action.label}")
                     print(f"💬  {C.YELLOW}Reasoning:{C.RESET} {reason}")
                     
                     dialogue = decision.get("rival_dialogue")
                     if dialogue:
                         dialogue_clean = dialogue.replace("\n", " ").strip()
                         print(f"🗣️  {C.CYAN}{C.BOLD}Rival Dialogue:{C.RESET} {dialogue_clean}")
-                        await self.ps_client.send_message(dialogue_clean, room=battle.battle_tag)
+                        self._pending_dialogue[battle.battle_tag] = dialogue_clean
                     
-                    if chosen_action["type"] == "move":
-                        return self.create_order(battle.available_moves[chosen_action["index"]])
-                    elif chosen_action["type"] == "switch":
-                        return self.create_order(battle.available_switches[chosen_action["index"]])
+                    if chosen_action.kind in ("move", "switch"):
+                        return self.create_order(chosen_action.order)
                 else:
                     print(f"\n❌  Gemini selected invalid action index: {action_idx + 1}")
 
@@ -270,7 +401,22 @@ class PokémonAssistant(Player):
 
     async def choose_doubles_move(self, battle: DoubleBattle) -> DoubleBattleOrder:
         await self.ps_client.send_message(f"/join {battle.battle_tag}")
-        prompt = build_doubles_llm_prompt(battle)
+        slot_ranked = [score_double_slot_actions(battle, 0), score_double_slot_actions(battle, 1)]
+        slot_shortlists = [ranked[:3] for ranked in slot_ranked]
+        if all(slot_shortlists[slot] and should_skip_llm(slot_shortlists[slot]) for slot in range(2)):
+            final_orders = [slot_shortlists[0][0].order, slot_shortlists[1][0].order]
+            print(f"\n🤖  Heuristic Doubles Decision: Slot 1 -> {slot_shortlists[0][0].label} | Slot 2 -> {slot_shortlists[1][0].label}")
+            print(f"💬  Slot 1: {slot_shortlists[0][0].reason}")
+            print(f"💬  Slot 2: {slot_shortlists[1][0].reason}")
+            return DoubleBattleOrder(first_order=final_orders[0], second_order=final_orders[1])
+
+        slot_texts = []
+        for slot in range(2):
+            slot_texts.append(
+                f"─── TOP OPTIONS SLOT {slot + 1} ─────────────────────────\n"
+                + summarize_actions(slot_shortlists[slot])
+            )
+        prompt = build_doubles_llm_prompt(battle, shortlist_text="\n\n".join(slot_texts))
         clipboard_ok = copy_to_clipboard(prompt)
 
         print("\n" + "═" * 70)
@@ -282,39 +428,26 @@ class PokémonAssistant(Player):
         else:
             print("\n⚠️   Clipboard unavailable. Copy the prompt above manually.")
 
-        valid_orders = battle.valid_orders
         final_orders = [None, None]
-        slot_actions = [[], []]
-
-        for slot in range(2):
-            active_mon = battle.active_pokemon[slot]
-            slot_orders = valid_orders[slot]
-            non_pass_orders = self._non_tera_orders(
-                o for o in slot_orders if not isinstance(o, PassBattleOrder)
-            )
-            
-            for idx, order in enumerate(non_pass_orders):
-                desc = format_order_for_display(order, battle)
-                slot_actions[slot].append({
-                    "index": idx,
-                    "description": desc,
-                    "order": order
-                })
+        slot_actions = slot_shortlists
 
         # Query Gemini if configured
         if self.llm_client.is_configured():
+            # Send previous turn's dialogue after the turn resolved
+            prev_dialogue = self._pending_dialogue.pop(battle.battle_tag, None)
+            if prev_dialogue:
+                await self.ps_client.send_message(prev_dialogue, room=battle.battle_tag)
+
             actions_str = ""
             for slot in range(2):
-                active_mon = battle.active_pokemon[slot]
-                mon_name = active_mon.species if active_mon else f"Slot {slot+1}"
-                actions_str += f"\nAVAILABLE ACTIONS FOR {mon_name} (Slot {slot+1}):\n"
+                actions_str += f"\n─── ACTIONS SLOT {slot+1} ───────────────────────────\n"
                 if not slot_actions[slot]:
                     actions_str += "  [1] PASS (No action available)\n"
                 else:
                     for i, a in enumerate(slot_actions[slot]):
-                        actions_str += f"  [{i+1}] {a['description']}\n"
+                        actions_str += f"  [{i+1}] {a.label}\n"
             
-            full_prompt = f"{prompt}\n\n{actions_str}\n\nYou MUST select one action index for Slot 1 and one action index for Slot 2 from the lists above. Respond with the schema."
+            full_prompt = f"{prompt}\n\n{actions_str}\n\nPick one top option for Slot 1 and one for Slot 2. Respond with the schema."
             
             decision = await self.llm_client.get_decision(full_prompt, DoublesBattleDecision)
             if decision:
@@ -327,7 +460,7 @@ class PokémonAssistant(Player):
                 if dialogue:
                     dialogue_clean = dialogue.replace("\n", " ").strip()
                     print(f"🗣️  {C.CYAN}{C.BOLD}Rival Dialogue:{C.RESET} {dialogue_clean}")
-                    await self.ps_client.send_message(dialogue_clean, room=battle.battle_tag)
+                    self._pending_dialogue[battle.battle_tag] = dialogue_clean
                 
                 for slot in range(2):
                     active_mon = battle.active_pokemon[slot]
@@ -340,11 +473,11 @@ class PokémonAssistant(Player):
                     
                     if 0 <= action_idx < len(slot_actions[slot]):
                         chosen = slot_actions[slot][action_idx]
-                        print(f"  Slot {slot+1} action: {chosen['description']}")
-                        final_orders[slot] = chosen["order"]
+                        print(f"  Slot {slot+1} action: {chosen.label}")
+                        final_orders[slot] = chosen.order
                     else:
                         print(f"  Slot {slot+1} action index invalid ({action_idx+1}), using first option.")
-                        final_orders[slot] = slot_actions[slot][0]["order"]
+                        final_orders[slot] = slot_actions[slot][0].order
                 
                 return DoubleBattleOrder(first_order=final_orders[0] or PassBattleOrder(), second_order=final_orders[1] or PassBattleOrder())
 
@@ -352,15 +485,15 @@ class PokémonAssistant(Player):
         if self.auto_play:
             for slot in range(2):
                 if slot_actions[slot]:
-                    final_orders[slot] = slot_actions[slot][0]["order"]
-                    print(f"\n🤖  Auto fallback slot {slot + 1}: {slot_actions[slot][0]['description']}")
+                    final_orders[slot] = slot_actions[slot][0].order
+                    print(f"\n🤖  Auto fallback slot {slot + 1}: {slot_actions[slot][0].label}")
                 else:
                     final_orders[slot] = PassBattleOrder()
             return DoubleBattleOrder(first_order=final_orders[0] or PassBattleOrder(), second_order=final_orders[1] or PassBattleOrder())
 
         for slot in range(2):
             active_mon = battle.active_pokemon[slot]
-            non_pass_orders = [a["order"] for a in slot_actions[slot]]
+            non_pass_orders = [a.order for a in slot_actions[slot]]
 
             if not non_pass_orders:
                 final_orders[slot] = PassBattleOrder()
@@ -369,7 +502,7 @@ class PokémonAssistant(Player):
 
             print(f"\n📋  AVAILABLE ACTIONS FOR SLOT {slot + 1} ({active_mon.species if active_mon else 'Empty'}):")
             for idx, action in enumerate(slot_actions[slot], 1):
-                print(f"    [{idx}]  →  {action['description']}")
+                print(f"    [{idx}]  →  {action.label}")
 
             print(f"Commands for Slot {slot + 1}: Enter choice number (1-{len(non_pass_orders)}) | 'c' to copy prompt")
 

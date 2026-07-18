@@ -280,7 +280,7 @@ def format_switches(switches: List[Pokemon]) -> str:
         return "  (none)"
     return "\n".join(f"  - {mon.species} (HP: {hp_str(mon)}, Status: {status_str(mon)})" for mon in switches)
 
-def build_llm_prompt(battle: Battle) -> str:
+def build_llm_prompt(battle: Battle, shortlist_text: str = "") -> str:
     mon = battle.active_pokemon
     opp = battle.opponent_active_pokemon
 
@@ -376,9 +376,11 @@ You are Blue, the rival trainer from Pallet Town — cocky, confident, and sharp
 ─── BENCH ──────────────────────────────────────
 [SWITCH OPTIONS]:
 {switches}
+
+{shortlist_text}
 """.strip()
 
-def build_doubles_llm_prompt(battle: Battle) -> str:
+def build_doubles_llm_prompt(battle: Battle, shortlist_text: str = "") -> str:
     # Double battles helper
     active_my = battle.active_pokemon
     active_opp = battle.opponent_active_pokemon
@@ -496,4 +498,6 @@ Target values for slot actions:
   Ally slot 1 → -1    Ally slot 2 → -2
   Opponent slot 1 → 1  Opponent slot 2 → 2
   Self / All targets → 0
+
+{shortlist_text}
 """.strip()
