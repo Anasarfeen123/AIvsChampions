@@ -118,7 +118,7 @@
   }
 
   function showChoose() {
-    if (phase === 'battle' || phase === 'result') return;
+    if (phase === 'battle') return;
     stopBattleMusic();
     phase = 'choose';
     currentDifficulty = null;
