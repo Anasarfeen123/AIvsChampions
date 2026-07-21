@@ -29,7 +29,7 @@ from prompt_builder import (
     opp_team_summary,
     format_order_for_display,
 )
-from llm_client import GeminiClient, OllamaClient, SingleBattleDecision, DoublesBattleDecision
+from llm_client import GeminiClient, OllamaClient, PuterClient, SingleBattleDecision, DoublesBattleDecision
 
 def copy_to_clipboard(text: str) -> bool:
     data = text.encode()
@@ -63,11 +63,14 @@ class PokémonAssistant(Player):
         gemini_api_key: Optional[str] = None,
         llm_provider: str = "gemini",
         ollama_model: str = "qwen2.5:7b",
+        puter_model: str = "claude-3-5-sonnet",
         auto_play: bool = True,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.llm_provider = llm_provider
+        self.ollama_model = ollama_model
+        self.puter_model = puter_model
         self.auto_play = auto_play
         self._pending_dialogue: dict[str, str] = {}
         self._gemini_api_key = gemini_api_key
@@ -75,11 +78,28 @@ class PokémonAssistant(Player):
         self.rematch_event = asyncio.Event()
         self.current_difficulty: Optional[str] = None
         self.browser_username: Optional[str] = None
-        if llm_provider == "ollama":
+        if llm_provider == "puter":
+            self.llm_client = PuterClient(model_name=puter_model)
+        elif llm_provider == "ollama":
             self.llm_client = OllamaClient(model_name=ollama_model)
         else:
             self.llm_client = GeminiClient(api_key=gemini_api_key)
         self._install_ps_message_hook()
+
+    def _update_provider(self, provider_name: str):
+        provider_name = provider_name.lower()
+        if provider_name == "puter":
+            self.llm_provider = "puter"
+            self.llm_client = PuterClient(model_name=getattr(self, "puter_model", "claude-3-5-sonnet"))
+            print(f"\n⚙️  LLM Provider switched to Puter.js ({getattr(self, 'puter_model', 'claude-3-5-sonnet')})")
+        elif provider_name == "ollama":
+            self.llm_provider = "ollama"
+            self.llm_client = OllamaClient(model_name=getattr(self, "ollama_model", "qwen2.5:7b"))
+            print(f"\n⚙️  LLM Provider switched to Ollama ({getattr(self, 'ollama_model', 'qwen2.5:7b')})")
+        elif provider_name == "gemini":
+            self.llm_provider = "gemini"
+            self.llm_client = GeminiClient(api_key=getattr(self, "_gemini_api_key", None))
+            print(f"\n⚙️  LLM Provider switched to Gemini API")
 
     async def _set_difficulty(self, level: str):
         self.current_difficulty = level
@@ -115,6 +135,17 @@ class PokémonAssistant(Player):
                             text = text.split(" ", 1)[1].strip() if " " in text else ""
                         if text.startswith("battle-control "):
                             text = text.split(" ", 1)[1].strip() if " " in text else ""
+                        if text.startswith("puter "):
+                            val = text.split(" ", 1)[1].strip().lower()
+                            if val in ("on", "true"):
+                                self._update_provider("puter")
+                            elif val in ("off", "false"):
+                                self._update_provider("ollama" if hasattr(self, "ollama_model") else "gemini")
+                            return True
+                        if text.startswith("provider "):
+                            p_val = text.split(" ", 1)[1].strip().lower()
+                            self._update_provider(p_val)
+                            return True
                         if text.startswith("!difficulty"):
                             parts2 = text.split(" ", 1)
                             level = parts2[1].strip().lower() if len(parts2) > 1 else None
@@ -148,6 +179,15 @@ class PokémonAssistant(Player):
                         continue
                     action = match.group(1).lower()
                     value = (match.group(2) or "").lower()
+                    if action == "puter":
+                        if value in ("on", "true", ""):
+                            self._update_provider("puter")
+                        elif value in ("off", "false"):
+                            self._update_provider("ollama" if hasattr(self, "ollama_model") else "gemini")
+                        return True
+                    if action == "provider" and value:
+                        self._update_provider(value)
+                        return True
                     if action == "difficulty" and value in ("easy", "medium", "hard"):
                         await self._set_difficulty(value)
                         self.difficulty_event.set()

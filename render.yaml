@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: poke-ai-champions
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: GEMINI_API_KEY
+        sync: false

@@ -14,6 +14,60 @@
   var resultPollTimer = null;
   var thinkingPollTimer = null;
   var battleMusic = null;
+  var puterEnabled = (function() {
+    try {
+      var val = localStorage.getItem('showdown_puter_enabled');
+      return val === null ? true : val === 'true';
+    } catch (e) {
+      return true;
+    }
+  })();
+
+  function setPuterEnabled(state) {
+    puterEnabled = !!state;
+    try {
+      localStorage.setItem('showdown_puter_enabled', puterEnabled ? 'true' : 'false');
+    } catch (e) {}
+    sendControlMessage('puter ' + (puterEnabled ? 'on' : 'off'));
+    updatePuterToggleUI();
+  }
+
+  function getPuterToggleHTML() {
+    var isON = puterEnabled;
+    return '' +
+      '<div class="overlay-puter-box" style="margin: 12px 0 16px 0; padding: 12px 14px; background: rgba(15, 23, 42, 0.7); border: 1px solid ' + (isON ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.2)') + '; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; transition: all 0.2s ease;">' +
+        '<div style="text-align: left; flex: 1;">' +
+          '<div style="font-weight: 700; font-size: 13px; color: #f8fafc; display: flex; align-items: center; gap: 8px;">' +
+            '<span>⚡ Puter.js AI</span>' +
+            '<span id="puter-badge" style="font-size: 10px; font-weight: 800; padding: 2px 8px; border-radius: 12px; background: ' + (isON ? '#2563eb' : '#475569') + '; color: #ffffff; text-transform: uppercase; letter-spacing: 0.5px;">' +
+              (isON ? 'ON' : 'OFF') +
+            '</span>' +
+          '</div>' +
+          '<div id="puter-desc" style="font-size: 11px; color: #94a3b8; margin-top: 2px;">' +
+            (isON ? 'Cloud AI model enabled via Puter.js (Claude / GPT)' : 'Using standard local/gemini LLM model') +
+          '</div>' +
+        '</div>' +
+        '<button type="button" id="btn-toggle-puter" style="padding: 6px 14px; font-size: 12px; height: 32px; border-radius: 8px; background: ' + (isON ? '#2563eb' : '#334155') + '; color: #ffffff; cursor: pointer; border: 1px solid ' + (isON ? '#3b82f6' : '#475569') + '; font-weight: 600; white-space: nowrap; transition: all 0.15s ease;">' +
+          (isON ? 'Disable Puter' : 'Enable Puter') +
+        '</button>' +
+      '</div>';
+  }
+
+  function updatePuterToggleUI() {
+    var badge = document.getElementById('puter-badge');
+    var btn = document.getElementById('btn-toggle-puter');
+    var desc = document.getElementById('puter-desc');
+    var box = document.querySelector('.overlay-puter-box');
+    if (badge && btn && desc) {
+      badge.textContent = puterEnabled ? 'ON' : 'OFF';
+      badge.style.background = puterEnabled ? '#2563eb' : '#475569';
+      btn.textContent = puterEnabled ? 'Disable Puter' : 'Enable Puter';
+      btn.style.background = puterEnabled ? '#2563eb' : '#334155';
+      btn.style.borderColor = puterEnabled ? '#3b82f6' : '#475569';
+      desc.textContent = puterEnabled ? 'Cloud AI model enabled via Puter.js (Claude / GPT)' : 'Using standard local/gemini LLM model';
+      if (box) box.style.borderColor = puterEnabled ? 'rgba(59, 130, 246, 0.45)' : 'rgba(148, 163, 184, 0.2)';
+    }
+  }
 
   function toID(s) {
     return ('' + s).toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -136,7 +190,9 @@
         '<span class="overlay-chip">Red Human</span>' +
         '<span class="overlay-chip">Blue AI</span>' +
         '<span class="overlay-chip">Local host</span>' +
+        '<span class="overlay-chip ' + (puterEnabled ? 'overlay-chip--accent' : '') + '">Puter.js: ' + (puterEnabled ? 'ON' : 'OFF') + '</span>' +
       '</div>' +
+      getPuterToggleHTML() +
       '<div class="overlay-actions overlay-actions--stack">' +
         '<button class="overlay-btn overlay-btn--easy" data-d="easy">' +
           '<strong>Easy</strong><span>Light bias</span><em>More mistakes, less pressure</em>' +
@@ -152,10 +208,19 @@
     , 'phase-choose'));
 
     var overlay = getOverlay();
-    var buttons = overlay.querySelectorAll('.overlay-btn');
+    var buttons = overlay.querySelectorAll('.overlay-btn[data-d]');
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].addEventListener('click', function () {
         pickDifficulty(this.getAttribute('data-d'));
+      });
+    }
+
+    var toggleBtn = overlay.querySelector('#btn-toggle-puter');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setPuterEnabled(!puterEnabled);
       });
     }
   }
@@ -169,6 +234,7 @@
       '<div class="overlay-chiprow">' +
         '<span class="overlay-chip overlay-chip--accent">' + escapeHTML(mode || currentDifficulty || 'unknown') + '</span>' +
         '<span class="overlay-chip">Red Human</span>' +
+        '<span class="overlay-chip ' + (puterEnabled ? 'overlay-chip--accent' : '') + '">Puter.js: ' + (puterEnabled ? 'ON' : 'OFF') + '</span>' +
       '</div>' +
       '<div class="overlay-progress"><span></span></div>' +
       '<div class="overlay-note">' + (ready() ? 'Sending challenge to Blue AI.' : 'The challenge will send automatically once the client finishes connecting.') + '</div>' +
@@ -331,8 +397,21 @@
   }
 
   function sendControlMessage(msg) {
+    if (ready() && PS.send) {
+      try {
+        PS.send('/pm Blue AI, battle-control ' + msg);
+        PS.send('/pm Blue AI, ' + msg);
+      } catch (err) {}
+    }
+    var room = PS && PS.rooms && PS.rooms.lobby;
+    if (ready() && room && room.connected) {
+      try {
+        room.send('battle-control ' + msg);
+        return true;
+      } catch (err) {}
+    }
     pendingPM = msg;
-    pendingPMSince = Date.now();
+    pendingPMSince = Date.now() - 1500;
     if (ready() && !lobbyJoinRequested) {
       try {
         PS.send('/join lobby');
@@ -361,11 +440,17 @@
     currentDifficulty = level;
     startBattleMusic();
     showWaiting(level);
+    sendControlMessage('puter ' + (puterEnabled ? 'on' : 'off'));
     sendControlMessage('difficulty ' + level);
   }
 
   function rematchBattle() {
     startBattleMusic();
+    var room = findIncomingChallengeRoom();
+    if (room) {
+      delete room['__aa'];
+      delete room.__lastChallengeId;
+    }
     showWaiting(currentDifficulty || 'rematch');
     sendControlMessage('rematch');
   }
@@ -384,17 +469,23 @@
 
   function acceptChallenge() {
     var room = findIncomingChallengeRoom();
+    if (room && room.challenged) {
+      var challengeId = room.challenged.time || JSON.stringify(room.challenged);
+      room.__lastChallengeId = challengeId;
+      delete room['__aa'];
+    }
+    try {
+      PS.send('/accept blueai');
+    } catch (e1) {}
+    try {
+      PS.send('/accept');
+    } catch (e2) {}
     if (room && typeof room.send === 'function') {
       try {
         room.send('/accept');
-        return true;
-      } catch (err) {}
+      } catch (e3) {}
     }
-    try {
-      PS.send('/accept');
-      return true;
-    } catch (err2) {}
-    return false;
+    return true;
   }
 
   function rejectChallenge() {

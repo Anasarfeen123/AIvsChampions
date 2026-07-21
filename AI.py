@@ -17,7 +17,7 @@ from config_manager import BLUE_TEAM, C
 
 FORMAT = "gen9nationaldexounotera"
 SHOWDOWN_DIR = Path(__file__).resolve().parent / "pokemon-showdown"
-SHOWDOWN_PORT = 8000
+SHOWDOWN_PORT = int(os.environ.get("PORT") or os.environ.get("PSPORT") or 8000)
 
 def is_showdown_running() -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -105,8 +105,9 @@ async def play_one_battle(blue_ai: PokémonAssistant, fmt: str, shutdown_event: 
 
 async def main():
     parser = argparse.ArgumentParser(description="Pokémon Showdown LLM Opponent")
-    parser.add_argument("--provider", "-p", choices=["gemini", "ollama"], default="ollama", help="LLM Provider (default: ollama)")
+    parser.add_argument("--provider", "-p", choices=["gemini", "ollama", "puter"], default="puter", help="LLM Provider (default: puter)")
     parser.add_argument("--model", "-m", default="qwen2.5:7b", help="Ollama model name (default: qwen2.5:7b)")
+    parser.add_argument("--puter-model", default="claude-3-5-sonnet", help="Puter model name (default: claude-3-5-sonnet)")
     parser.add_argument("--server", "-s", choices=["localhost", "showdown"], default="localhost", help="Server to connect to (default: localhost)")
     parser.add_argument("--wizard", "-w", action="store_true", help="Run the interactive setup wizard")
 
@@ -121,8 +122,9 @@ async def main():
         ai_team = cfg["_ai_team"]
         fmt = cfg["format"]
         server = cfg["server"]
-        llm_provider = cfg.get("llm_provider", "ollama")
+        llm_provider = cfg.get("llm_provider", "puter")
         ollama_model = cfg.get("ollama_model", "qwen2.5:7b")
+        puter_model = cfg.get("puter_model", "claude-3-5-sonnet")
         gemini_api_key = cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     else:
         ai_team = BLUE_TEAM
@@ -130,6 +132,7 @@ async def main():
         server = args.server
         llm_provider = args.provider
         ollama_model = args.model
+        puter_model = args.puter_model
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
 
     server_process = ensure_showdown_server()
@@ -146,6 +149,7 @@ async def main():
         gemini_api_key=gemini_api_key,
         llm_provider=llm_provider,
         ollama_model=ollama_model,
+        puter_model=puter_model,
         auto_play=True,
         battle_format=fmt,
         team=ai_teambuilder,
@@ -192,6 +196,7 @@ async def main():
 
             # ── Inner loop: keep playing rematches with this difficulty ──
             while not shutdown_event.is_set():
+                blue_ai.rematch_event.clear()
                 ok = await play_one_battle(blue_ai, fmt, shutdown_event)
                 if not ok:
                     break

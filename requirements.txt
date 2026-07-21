@@ -1,0 +1,8 @@
+poke_env>=0.15.0
+httpx>=0.28.1
+pydantic>=2.0.0
+google-genai>=2.0.0
+websockets>=16.0
+orjson>=3.11.0
+numpy
+tabulate

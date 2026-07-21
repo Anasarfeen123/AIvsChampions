@@ -93,10 +93,17 @@
 				this.$battle.css('transform', 'scale(' + scale + ')');
 				this.$foeHint.css('transform', 'scale(' + scale + ')');
 				this.$controls.css('top', 360 * scale + 10);
+				this.$controls.css('width', '');
 			} else {
-				this.$battle.css('transform', 'none');
-				this.$foeHint.css('transform', 'none');
-				this.$controls.css('top', 370);
+				// Scale up battle to fill available width (max 1.8x)
+				var hiddenChat = this.$el.hasClass('showing-chat');
+				var maxWidth = hiddenChat ? width - 310 : width - 8;
+				var scale = Math.min(maxWidth / 640, 1.8);
+				scale = Math.max(scale, 1);
+				this.$battle.css('transform', 'scale(' + scale + ')');
+				this.$foeHint.css('transform', 'scale(' + scale + ')');
+				this.$controls.css('top', 360 * scale + 10);
+				this.$controls.css('width', 640 * scale);
 			}
 			this.$el.toggleClass('small-layout', width < 830);
 			this.$el.toggleClass('tiny-layout', width < 640);

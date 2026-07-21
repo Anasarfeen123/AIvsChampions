@@ -50,8 +50,9 @@ DEFAULT_CONFIG = {
     "saved_teams": {},
     "last_opponent": "",
     "gemini_api_key": "",
-    "llm_provider": "gemini",
+    "llm_provider": "puter",
     "ollama_model": "qwen2.5:7b",
+    "puter_model": "claude-3-5-sonnet",
 }
 
 def load_config() -> dict:
@@ -229,9 +230,14 @@ def startup_wizard() -> dict:
     section("LLM PROVIDER")
     print(f"  {C.BOLD}[1]{C.RESET} Gemini API  (cloud)")
     print(f"  {C.BOLD}[2]{C.RESET} Ollama  (local model)")
-    provider_choice = ask("LLM Provider", "2" if cfg.get("llm_provider") == "ollama" else "1")
+    print(f"  {C.BOLD}[3]{C.RESET} Puter.js  (Puter cloud AI)")
+    default_provider = "3" if cfg.get("llm_provider") == "puter" else ("2" if cfg.get("llm_provider") == "ollama" else "1")
+    provider_choice = ask("LLM Provider", default_provider)
 
-    if provider_choice == "2":
+    if provider_choice == "3":
+        cfg["llm_provider"] = "puter"
+        cfg["puter_model"] = ask("Puter model", cfg.get("puter_model", "claude-3-5-sonnet"))
+    elif provider_choice == "2":
         cfg["llm_provider"] = "ollama"
         models = get_ollama_models()
         if models:
@@ -309,8 +315,10 @@ def startup_wizard() -> dict:
     print(f"  Team lead : {C.CYAN}{first_mon}{C.RESET}")
     ai_first_mon = BLUE_TEAM.strip().split("\n")[0]
     print(f"  AI team   : {C.CYAN}{ai_first_mon} / Blue{C.RESET}")
-    llm_provider = cfg.get("llm_provider", "gemini")
-    if llm_provider == "ollama":
+    llm_provider = cfg.get("llm_provider", "puter")
+    if llm_provider == "puter":
+        llm_status = f"{C.GREEN}Puter.js ({cfg.get('puter_model', 'claude-3-5-sonnet')}){C.RESET}"
+    elif llm_provider == "ollama":
         llm_status = f"{C.GREEN}Ollama ({cfg.get('ollama_model')}){C.RESET}"
     else:
         gemini_status = f"{C.GREEN}Configured{C.RESET}" if os.environ.get("GEMINI_API_KEY") else f"{C.YELLOW}Not Configured (Manual Fallback){C.RESET}"

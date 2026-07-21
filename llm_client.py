@@ -167,3 +167,92 @@ class OllamaClient:
         except Exception as e:
             print(f"\n❌  Ollama API Request failed: {e}")
             return None
+
+
+class PuterClient:
+    def __init__(self, model_name: str = "claude-3-5-sonnet"):
+        self.model_name = model_name
+        self.api_url = "https://api.puter.com/v2/ai/chat"
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def get_decision(self, prompt: str, schema: Any) -> Optional[dict]:
+        import re
+        system_instruction = "You are a Grandmaster-level Competitive Pokémon Player."
+        try:
+            with open("prompt.txt") as f:
+                system_instruction = f.read()
+        except Exception:
+            pass
+
+        schema_info = ""
+        if schema == SingleBattleDecision:
+            schema_info = (
+                "\n\nYou MUST return a JSON object with exactly these fields:\n"
+                "{\n"
+                '  "reasoning_summary": "A concise explanation of the move in English.",\n'
+                '  "rival_dialogue": "One short rival line as Blue in first person using placeholders when they fit.",\n'
+                '  "action_index": <integer index of the chosen action>\n'
+                "}"
+            )
+        elif schema == DoublesBattleDecision:
+            schema_info = (
+                "\n\nYou MUST return a JSON object with exactly these fields:\n"
+                "{\n"
+                '  "reasoning_summary": "A concise explanation of the moves in English.",\n'
+                '  "rival_dialogue": "One short rival line as Blue in first person using placeholders when they fit.",\n'
+                '  "slot1_action_index": <integer index of slot 1 action>,\n'
+                '  "slot2_action_index": <integer index of slot 2 action>\n'
+                "}"
+            )
+
+        full_prompt = prompt + schema_info
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": full_prompt}
+        ]
+
+        print(f"\n🤖  Querying Puter.js ({self.model_name}) for decision...")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                payload = {
+                    "interface": "puter-chat-completion",
+                    "driver": "openai",
+                    "model": self.model_name,
+                    "test_mode": False,
+                    "messages": messages,
+                    "temperature": 0.1
+                }
+                response = await client.post(self.api_url, json=payload)
+                if response.status_code == 200:
+                    data = response.json()
+                    content = ""
+                    if isinstance(data, dict):
+                        if "message" in data and isinstance(data["message"], dict) and "content" in data["message"]:
+                            content = data["message"]["content"]
+                        elif "text" in data:
+                            content = data["text"]
+                        elif "result" in data:
+                            content = data["result"]
+                        elif "choices" in data and isinstance(data["choices"], list) and len(data["choices"]) > 0:
+                            content = data["choices"][0].get("message", {}).get("content", "")
+                        else:
+                            content = json.dumps(data)
+                    else:
+                        content = str(data)
+
+                    json_match = re.search(r"\{.*\}", content, re.DOTALL)
+                    if json_match:
+                        content = json_match.group(0)
+
+                    decision = json.loads(content)
+                    return decision
+                else:
+                    print(f"\n⚠️  Puter.js API returned status code {response.status_code}: {response.text[:150]}")
+        except Exception as e:
+            print(f"\n❌  Puter.js API Request failed: {e}")
+
+        return None
+

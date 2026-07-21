@@ -1,4 +1,5 @@
 (function () {
+  'use strict';
   var PACKED_TEAM =
     "Pikachu|Pikachu|Light Ball|Static|Volt Tackle,Thunderbolt,Iron Tail,Quick Attack|Naive|0,252,0,4,0,252||31,31,31,31,31,31||100|]" +
     "Espeon|Espeon|Light Clay|Magic Bounce|Psychic,Shadow Ball,Reflect,Calm Mind|Timid|252,0,0,4,0,252||31,31,31,31,31,31||100|]" +
@@ -7,108 +8,101 @@
     "Charizard|Charizard|Heavy-Duty Boots|Blaze|Flamethrower,Air Slash,Dragon Pulse,Earthquake|Naive|0,4,0,252,0,252||31,31,31,31,31,31||100|]" +
     "Blastoise|Blastoise|White Herb|Torrent|Scald,Ice Beam,Aura Sphere,Rain Dance|Modest|0,0,4,252,0,252||31,31,31,31,31,31||100|";
 
-  var ACCEPTED_KEY = "__auto_accepted";
-  var CHALLENGED_AI_KEY = "__challenged_ai";
-  var LOG_PREFIX = "[AutoBattle]";
+  var ACCEPTED_KEY = '__aa';
 
-  function log(msg) {
-    console.log(LOG_PREFIX, msg);
-  }
+  function toID(s) { return ('' + s).toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 
-  function send(cmd) {
-    if (PS && PS.connection && PS.connection.connected) {
-      PS.send(cmd);
-      log("Sent: " + cmd);
+  function log(m) { console.log('[AB]', m); }
+
+  function findIncomingChallengeRoom() {
+    if (!PS || !PS.rooms) return null;
+    for (var id in PS.rooms) {
+      var room = PS.rooms[id];
+      if (!room || !room.challenged) continue;
+      if (!room.challenging) return room;
+      if (!room.pmTarget) continue;
+      if (toID(room.pmTarget) === 'blueai') return room;
     }
-  }
-
-  function autoLogin() {
-    if (PS.user.named) { log("Already named: " + PS.user.name); return; }
-    if (PS.user.loggingIn) { log("Already logging in..."); return; }
-    var userid = toID("User");
-    if (userid === PS.user.userid) { log("Already User"); return; }
-    log("Logging in as User...");
-    PS.user.changeName("User");
-  }
-
-  function setTeam() {
-    if (PS.mainmenu && PS.mainmenu.teamSent) { log("Team already sent"); return; }
-    log("Setting team...");
-    send("/utm " + PACKED_TEAM);
-  }
-
-  function autoAcceptChallenge() {
-    var roomCount = 0;
-    for (var roomId in PS.rooms) {
-      roomCount++;
-      var room = PS.rooms[roomId];
-      var hasChallenge = !!room.challenged;
-      var pmTarget = room.pmTarget;
-      var pmTargetId = pmTarget ? toID(pmTarget) : null;
-      var alreadyAccepted = room[ACCEPTED_KEY];
-
-      if (hasChallenge && pmTargetId === "ai") {
-        if (alreadyAccepted) {
-          log("Room " + roomId + ": challenge already accepted, skipping");
-          continue;
-        }
-        log("Room " + roomId + ": FOUND challenge from AI! challenged=" + JSON.stringify(room.challenged));
-        room[ACCEPTED_KEY] = true;
-        setTeam();
-        log("Accepting challenge from AI...");
-        send("/accept ai");
-      }
-    }
-  }
-
-  function challengeAIDirectly() {
-    if (PS[CHALLENGED_AI_KEY]) return;
-    PS[CHALLENGED_AI_KEY] = true;
-    log("No challenge received yet; challenging AI directly...");
-    setTeam();
-    send("/challenge AI, gen9nationaldexounotera");
+    return null;
   }
 
   function start() {
-    if (!PS || !PS.connection || !PS.mainmenu) {
-      setTimeout(start, 200);
-      return;
-    }
-    if (location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
-      log("Not localhost, skipping.");
-      return;
-    }
+    if (!PS || !PS.connection) return void setTimeout(start, 200);
+    log('Waiting for connection…');
 
-    log("Starting auto-battle...");
+    var renameRequested = false;
+    var teamConfigured = false;
 
     var ready = setInterval(function () {
-      if (PS.connection.connected) {
-        clearInterval(ready);
-        log("Connected.");
-        autoLogin();
+      if (!PS.connection || !PS.connection.connected) return;
+      clearInterval(ready);
+      log('Connected');
 
-        var checkLogin = setInterval(function () {
-          if (PS.user.named) {
-            clearInterval(checkLogin);
-            log("Logged in as " + PS.user.name);
-            setTeam();
-
-            var challengeSince = Date.now();
-            setInterval(function () {
-              autoAcceptChallenge();
-
-              if (Date.now() - challengeSince > 10000) {
-                challengeAIDirectly();
-              }
-            }, 500);
+      var rename = setInterval(function () {
+        if (!PS.user) return;
+        if (PS.user.named) {
+          if (toID(PS.user.name) !== 'redhuman') {
+            if (!renameRequested) {
+              log('Wrong name, retrying…');
+              renameRequested = true;
+              PS.user.changeName('Red Human');
+            }
+            return;
           }
-        }, 300);
-      }
+          clearInterval(rename);
+          log('Logged in as ' + PS.user.name);
+          // Force animated sprites
+          try {
+            if (PS.prefs) {
+              if (typeof PS.prefs.set === 'function') {
+                PS.prefs.set('bwgfx', 1); PS.prefs.set('noanim', false);
+              } else { PS.prefs.bwgfx = 1; PS.prefs.noanim = false; }
+            }
+            if (window.Dex && typeof Dex.loadSpriteData === 'function' && typeof jQuery !== 'undefined') {
+              Dex.loadSpriteData('bw');
+            }
+          } catch (e) {}
+          // Set team only once.
+          if (!teamConfigured) {
+            teamConfigured = true;
+            log('Setting team');
+            PS.send('/utm ' + PACKED_TEAM);
+          }
+          // Accept challenges
+          setInterval(function () {
+            try {
+              var room = findIncomingChallengeRoom();
+              if (!room) return;
+              if (room.challenged) {
+                var cid = room.challenged.time || JSON.stringify(room.challenged);
+                if (room.__lastCid !== cid) {
+                  room.__lastCid = cid;
+                  delete room[ACCEPTED_KEY];
+                }
+              }
+              if (room[ACCEPTED_KEY]) return;
+              room[ACCEPTED_KEY] = true;
+              log('Accepting challenge');
+              if (typeof room.send === 'function') {
+                try { room.send('/accept'); } catch (e1) {}
+              }
+              try { PS.send('/accept blueai'); } catch (e2) {}
+              try { PS.send('/accept'); } catch (e3) {}
+            } catch (e) {}
+          }, 500);
+          return;
+        }
+        if (!PS.user.loggingIn && !renameRequested) {
+          log('Renaming to Red Human');
+          renameRequested = true;
+          PS.user.changeName('Red Human');
+        }
+      }, 300);
     }, 300);
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
   } else {
     start();
   }
