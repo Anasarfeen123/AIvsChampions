@@ -371,12 +371,8 @@
   }
 
   function stopPollers() {
-    if (battlePollTimer) clearInterval(battlePollTimer);
-    if (challengePollTimer) clearInterval(challengePollTimer);
     if (resultPollTimer) clearInterval(resultPollTimer);
     if (autoAcceptTimer) clearTimeout(autoAcceptTimer);
-    battlePollTimer = null;
-    challengePollTimer = null;
     resultPollTimer = null;
     autoAcceptTimer = null;
   }
@@ -440,6 +436,8 @@
     currentDifficulty = level;
     startBattleMusic();
     showWaiting(level);
+    detectChallenge();
+    detectBattleStart();
     sendControlMessage('puter ' + (puterEnabled ? 'on' : 'off'));
     sendControlMessage('difficulty ' + level);
   }
@@ -452,6 +450,8 @@
       delete room.__lastChallengeId;
     }
     showWaiting(currentDifficulty || 'rematch');
+    detectChallenge();
+    detectBattleStart();
     sendControlMessage('rematch');
   }
 
@@ -504,26 +504,31 @@
   }
 
   function detectBattleStart() {
-    if (battlePollTimer) return;
+    if (battlePollTimer) clearInterval(battlePollTimer);
     battlePollTimer = setInterval(function () {
-      if (phase === 'battle' || phase === 'result') return;
+      if (phase === 'battle') return;
       if (!document.querySelector('.battle')) return;
       showBattle();
-    }, 400);
+    }, 350);
   }
 
   function detectChallenge() {
-    if (challengePollTimer) return;
+    if (challengePollTimer) clearInterval(challengePollTimer);
     challengePollTimer = setInterval(function () {
-      if (phase === 'battle' || phase === 'result') return;
+      if (phase === 'battle') return;
       var room = findIncomingChallengeRoom();
-      if (room && (phase !== 'incoming' || activeChallengeRoomId !== room.id)) {
-        showIncomingChallenge(room);
+      if (room) {
+        if (phase === 'waiting' || phase === 'choose' || phase === 'incoming') {
+          acceptChallenge();
+          if (phase !== 'incoming') {
+            showIncomingChallenge(room);
+          }
+        }
       } else if (!room && phase === 'incoming') {
         activeChallengeRoomId = null;
         showWaiting(currentDifficulty || 'pending');
       }
-    }, 450);
+    }, 300);
   }
 
   function attachGlobalKeyBlocker() {
