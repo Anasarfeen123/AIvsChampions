@@ -36,11 +36,9 @@ const findFilesForPath = path => {
 		const files = fs.readdirSync(path);
 		for (const file of files) {
 			const cur = `${path}/${file}`;
-			if (cur.includes('node_modules') || cur.includes("/logs") || cur.includes("/databases") || cur.includes("/server/static")) continue;
+			if (cur.includes('node_modules') || cur.includes("/logs") || cur.includes("/databases")) continue;
 			try {
-				const stat = fs.lstatSync(cur);
-				if (stat.isSymbolicLink()) continue;
-				if (stat.isDirectory()) {
+				if (fs.statSync(cur).isDirectory()) {
 					out.push(...findFilesForPath(cur));
 				} else if (shouldBeCompiled(cur)) {
 					out.push(cur);
@@ -53,7 +51,7 @@ const findFilesForPath = path => {
 
 exports.transpile = decl => {
 	esbuild.buildSync({
-		entryPoints: findFilesForPath('./'),
+		entryPoints: findFilesForPath('.'),
 		outdir: './dist',
 		outbase: '.',
 		format: 'cjs',
