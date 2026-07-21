@@ -5,16 +5,22 @@ const child_process = require("child_process");
 const esbuild = require('esbuild');
 
 const copyOverDataJSON = (file = 'data') => {
-	const files = fs.readdirSync(file);
-	for (const f of files) {
-		if (fs.statSync(`${file}/${f}`).isDirectory()) {
-			copyOverDataJSON(`${file}/${f}`);
-		} else if (f.endsWith('.json')) {
-			const dest = require('path').resolve('dist', `${file}/${f}`);
-			fs.mkdirSync(require('path').dirname(dest), { recursive: true });
-			fs.copyFileSync(`${file}/${f}`, dest);
+	try {
+		if (!fs.existsSync(file)) return;
+		const files = fs.readdirSync(file);
+		for (const f of files) {
+			const cur = `${file}/${f}`;
+			try {
+				if (fs.statSync(cur).isDirectory()) {
+					copyOverDataJSON(cur);
+				} else if (f.endsWith('.json')) {
+					const dest = require('path').resolve('dist', cur);
+					fs.mkdirSync(require('path').dirname(dest), { recursive: true });
+					fs.copyFileSync(cur, dest);
+				}
+			} catch (err) {}
 		}
-	}
+	} catch (err) {}
 };
 
 const shouldBeCompiled = file => {
@@ -54,8 +60,12 @@ exports.transpile = decl => {
 		tsconfig: './tsconfig.json',
 		sourcemap: true,
 	});
-	fs.mkdirSync('./dist/config', { recursive: true });
-	fs.copyFileSync('./config/config-example.js', './dist/config/config-example.js');
+	try {
+		fs.mkdirSync('./dist/config', { recursive: true });
+		if (fs.existsSync('./config/config-example.js')) {
+			fs.copyFileSync('./config/config-example.js', './dist/config/config-example.js');
+		}
+	} catch (err) {}
 	copyOverDataJSON();
 
 	// NOTE: replace is asynchronous - add additional replacements for the same path in one call instead of making multiple calls.

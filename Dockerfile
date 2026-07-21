@@ -16,7 +16,7 @@ WORKDIR /app
 COPY . /app
 
 # Install Node dependencies and build Showdown TypeScript files
-RUN cd pokemon-showdown && npm install && node build
+RUN cd pokemon-showdown && mkdir -p dist/config && npm install && node build
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt || pip3 install --no-cache-dir -r requirements.txt
